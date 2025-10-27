@@ -10,9 +10,9 @@ use minigu_context::session::SessionContext;
 use minigu_planner::bound::{BoundExpr, BoundExprKind};
 use minigu_planner::plan::{PlanData, PlanNode};
 
-use crate::evaluator::BoxedEvaluator;
 use crate::evaluator::column_ref::ColumnRef;
 use crate::evaluator::constant::Constant;
+use crate::evaluator::BoxedEvaluator;
 use crate::executor::procedure_call::ProcedureCallBuilder;
 use crate::executor::sort::SortSpec;
 use crate::executor::{BoxedExecutor, Executor, IntoExecutor};
@@ -49,17 +49,20 @@ impl ExecutorBuilder {
             PlanNode::PhysicalNodeScan(_node_scan) => {
                 // Need to handle node scan for other path and query.
                 assert_eq!(children.len(), 0);
-                use minigu_catalog::provider::SchemaProvider;
                 let cur_schema = self
                     .session
                     .home_schema
                     .as_ref()
                     .expect("there should be a home schema");
-                let cur_graph = cur_schema
-                    .get_graph("test".to_string().as_str())
-                    .expect("there should be a test graph")
-                    .unwrap();
-                let provider: &dyn GraphProvider = cur_graph.as_ref();
+                // current set match on current graph.
+                let cur_graph = self
+                    .session
+                    .current_graph
+                    .as_ref()
+                    .expect("there should be a current graph")
+                    .object()
+                    .as_ref();
+                let provider: &dyn GraphProvider = cur_graph;
                 let container = provider
                     .as_any()
                     .downcast_ref::<GraphContainer>()
@@ -130,6 +133,22 @@ impl ExecutorBuilder {
                     .get_field_index_by_name(variable)
                     .expect("variable should be present in the schema");
                 Box::new(ColumnRef::new(index))
+            }
+            BoundExprKind::Property {
+                base,
+                field,
+                field_idx,
+            } => {
+                let base_col_idx = schema
+                    .get_field_index_by_name(base)
+                    .expect("base should be present in the schema");
+                Box::new()
+            }
+
+            BoundExprKind::Binary { op, left, right } => {
+                let l = self.build_evaluator(left, schema);
+                let r = self.build_evaluator(right, schema);
+                Box::new(BinaryEval::new(op, l, r))
             }
         }
     }

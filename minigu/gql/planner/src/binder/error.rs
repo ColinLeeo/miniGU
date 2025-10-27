@@ -81,6 +81,12 @@ pub enum BindError {
         "append \"return *\" to the statement if you want to use \"{0}\" as a query procedure"
     ))]
     NotCatalogProcedure(SmolStr),
+    
+    #[error("label id not exists")]
+    LabelIdNotExists(SmolStr),
+    
+    #[error("property path is empty")]
+    EmptyPropertyPath,
 
     // TODO: Remove this error variant
     #[error("unexpected bind error")]

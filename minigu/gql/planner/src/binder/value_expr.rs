@@ -1,20 +1,24 @@
 use gql_parser::ast::{
-    BinaryOp, BooleanLiteral, Expr, Literal, NonNegativeInteger, StringLiteral, StringLiteralKind,
-    UnsignedInteger, UnsignedIntegerKind, UnsignedNumericLiteral, Value,
+    BinaryOp, BooleanLiteral, Expr, Ident, Literal, NonNegativeInteger, StringLiteral,
+    StringLiteralKind, UnsignedInteger, UnsignedIntegerKind, UnsignedNumericLiteral, Value,
 };
 use minigu_common::constants::SESSION_USER;
 use minigu_common::data_type::LogicalType;
 use minigu_common::error::not_implemented;
 use minigu_common::value::ScalarValue;
 
-use super::Binder;
 use super::error::{BindError, BindResult};
-use crate::bound::{BoundBinaryOp, BoundExpr, BoundUnsignedInteger};
+use super::Binder;
+use crate::bound::{BoundBinaryOp, BoundExpr, BoundExprKind, BoundUnsignedInteger};
 
 impl Binder<'_> {
     pub fn bind_value_expression(&self, expr: &Expr) -> BindResult<BoundExpr> {
         match expr {
-            Expr::Binary { .. } => not_implemented("binary expression", None),
+            Expr::Binary { op, left, right } => {
+                let l = self.bind_value_expression(&left.value())?;
+                let r = self.bind_value_expression(&right.value())?;
+                self.bind_binary(op.value(), &l, &r)
+            }
             Expr::Unary { .. } => not_implemented("unary expression", None),
             Expr::DurationBetween { .. } => not_implemented("duration between expression", None),
             Expr::Is { .. } => not_implemented("is expression", None),
@@ -36,8 +40,82 @@ impl Binder<'_> {
             }
             Expr::Value(value) => bind_value(value),
             Expr::Path(_) => not_implemented("path expression", None),
-            Expr::Property { .. } => not_implemented("property expression", None),
+            Expr::Property {
+                source,
+                trailing_names,
+            } => self.bind_property(
+                source.value(),
+                trailing_names.iter().map(|n| n.value()).cloned().collect(),
+            ),
             Expr::Graph(_) => not_implemented("graph expression", None),
+        }
+    }
+
+    pub fn bind_property(
+        &self,
+        source: &Expr,
+        trailing_names: Vec<Ident>,
+    ) -> BindResult<BoundExpr> {
+        if trailing_names.is_empty() {
+            return Err(BindError::EmptyPropertyPath);
+        }
+
+        if trailing_names.len() != 1 {
+            return not_implemented("Property chaining not supported", None);
+        }
+
+        let base_var = match source {
+            Expr::Variable(var) => var,
+            _ => return Err(BindError::Unexpected),
+        };
+
+        let schema = self
+            .active_data_schema
+            .as_ref()
+            .ok_or_else(|| BindError::VariableNotFound(base_var.clone()))?;
+
+        let rec_field = schema
+            .get_field_by_name(base_var.as_str())
+            .ok_or_else(|| BindError::VariableNotFound(base_var.clone()))?;
+        let mut current_ty = rec_field.ty().clone();
+        let mut curent_nullable = rec_field.is_nullable();
+
+        // TODO: Support idx
+        let mut last_idx = 0usize;
+        let field_name = trailing_names[0].as_str();
+        Ok(BoundExpr {
+            kind: BoundExprKind::Property {
+                base: base_var.to_string(),
+                field: field_name.to_string(),
+                field_idx: last_idx,
+            },
+            logical_type: current_ty,
+            nullable: curent_nullable,
+        })
+    }
+
+    pub fn bind_binary(
+        &self,
+        op: &BinaryOp,
+        left: &BoundExpr,
+        right: &BoundExpr,
+    ) -> BindResult<BoundExpr> {
+        match op {
+            BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge => Ok(BoundExpr {
+                kind: BoundExprKind::Binary {
+                    op: bind_binary_op(&op),
+                    left: Box::new(left.clone()),
+                    right: Box::new(right.clone()),
+                },
+                logical_type: LogicalType::Boolean,
+                nullable: left.nullable && right.nullable,
+            }),
+            _ => not_implemented("only support eq,ne,lt,le,gt,ge operation", None),
         }
     }
 

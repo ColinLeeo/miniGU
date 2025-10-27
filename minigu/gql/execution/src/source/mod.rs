@@ -32,7 +32,11 @@ impl<I> VertexSource for I where I: Iterator<Item = VertexSourceOutput> {}
 /// A trait for sources that map vertex IDs to (multiple) property value columns.
 #[auto_impl(&, Box, Arc)]
 pub trait VertexPropertySource {
-    fn scan_vertex_properties(&self, vertices: &VertexIdArray) -> ExecutionResult<Vec<ArrayRef>>;
+    fn scan_vertex_properties(
+        &self,
+        vertices: &VertexIdArray,
+        props: Option<&[String]>,
+    ) -> ExecutionResult<Vec<ArrayRef>>;
 }
 
 /// A trait for sources that map a vertex to its neighbors and (possibly) properties of the

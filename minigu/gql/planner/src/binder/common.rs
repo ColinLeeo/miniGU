@@ -157,9 +157,11 @@ impl Binder<'_> {
                 let graph = self
                     .current_graph
                     .as_ref()
-                    .ok_or_else(|| BindError::Unexpected)?;
+                    .ok_or_else(|| BindError::CurrentGraphNotSpecified)?;
                 // To handle.
-                let id = graph.graph_type().get_label_id(name)?.unwrap();
+                let id = graph.graph_type().get_label_id(name)?.ok_or_else(
+                    || BindError::LabelIdNotExists(name.into())
+                )?;
                 Ok(BoundLabelExpr::Label(id))
             }
             LabelExpr::Negation(inner) => {

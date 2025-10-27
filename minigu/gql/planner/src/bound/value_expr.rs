@@ -8,6 +8,12 @@ use serde::Serialize;
 pub enum BoundExprKind {
     Value(ScalarValue),
     Variable(String),
+    Property {
+        base: String,
+        field: String,
+        field_idx: usize, // Filter push down.
+    },
+    Binary {op : BoundBinaryOp, left : Box<BoundExpr>, right : Box<BoundExpr>}
 }
 
 impl Display for BoundExprKind {
@@ -16,6 +22,10 @@ impl Display for BoundExprKind {
             // TODO: Use `Display` rather than `Debug` representation for `value`.
             BoundExprKind::Value(value) => write!(f, "{value:?}"),
             BoundExprKind::Variable(variable) => write!(f, "{variable}"),
+            BoundExprKind::Property { base, field, field_idx } => write!(f, "{base:?}: {field:#?}"),
+            BoundExprKind::Binary { op, left, right } => {
+                write!(f, "{left:?} {op:?}{right:?}")
+            }
         }
     }
 }

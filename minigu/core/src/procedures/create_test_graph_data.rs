@@ -39,16 +39,19 @@ pub fn build_procedure() -> Procedure {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("current schema not set"))?;
 
-        let graph = MemoryGraph::new();
-        let graph_type = Arc::new(MemoryGraphTypeCatalog::new());
+        let graph = MemoryGraph::with_config_fresh(Default::default(), Default::default());
+        let mut graph_type = MemoryGraphTypeCatalog::new();
+        let person_label_id = graph_type.add_label("PERSON".to_string()).unwrap();
+        let friend_label_id = graph_type.add_label("FRIEND".to_string()).unwrap();
         let container = Arc::new(GraphContainer::new(
-            graph_type.clone(),
+            Arc::new(graph_type),
             GraphStorage::Memory(graph.clone()),
         ));
 
         if !schema.add_graph(graph_name.clone(), container.clone()) {
             return Err(anyhow::anyhow!("graph `{graph_name}` already exists").into());
         }
+        
 
         context.current_graph = Some(NamedGraphRef::new(graph_name.into(), container.clone()));
 
@@ -58,14 +61,11 @@ pub fn build_procedure() -> Procedure {
 
         let txn = mem.txn_manager().begin_transaction(Serializable)?;
 
-        const PERSON_LABEL_ID: LabelId = LabelId::new(1).unwrap();
-        const FRIEND_LABEL_ID: LabelId = LabelId::new(2).unwrap();
-
         let mut id_map: Vec<u64> = Vec::with_capacity(n);
         for _i in 0..n as u64 {
             let vertex = Vertex::new(
                 VertexId::from(_i),
-                PERSON_LABEL_ID,
+                person_label_id,
                 PropertyRecord::new(vec![ScalarValue::String(Some("per".to_string()))]),
             );
             mem.create_vertex(&txn, vertex);
@@ -84,7 +84,7 @@ pub fn build_procedure() -> Procedure {
                     EdgeId::from((i * j) as u64),
                     src,
                     dst,
-                    FRIEND_LABEL_ID,
+                    friend_label_id,
                     PropertyRecord::new(vec![ScalarValue::String(Some("2024-03-01".to_string()))]),
                 );
                 mem.create_edge(&txn, edge);

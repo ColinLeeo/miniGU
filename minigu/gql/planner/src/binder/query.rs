@@ -26,6 +26,7 @@ impl Binder<'_> {
         &mut self,
         statement: &CompositeQueryStatement,
     ) -> BindResult<BoundCompositeQueryStatement> {
+        
         match statement {
             CompositeQueryStatement::Conjunction { .. } => {
                 not_implemented("query conjunction", None)
@@ -123,6 +124,7 @@ impl Binder<'_> {
         &mut self,
         statement: &SimpleQueryStatement,
     ) -> BindResult<BoundSimpleQueryStatement> {
+        eprintln!("== SimpleQueryStatement ==\n{:#?}", statement);
         match statement {
             SimpleQueryStatement::Match(statement) => {
                 let statement = self.bind_match_statement(statement)?;

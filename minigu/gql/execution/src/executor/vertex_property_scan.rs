@@ -47,7 +47,7 @@ where
                     .get(input_column_index)
                     .expect("column with `input_column_index` should exist");
                 let input_column = input_column.as_primitive();
-                let properties = gen_try!(source.scan_vertex_properties(input_column));
+                let properties = gen_try!(source.scan_vertex_properties(input_column, None));
                 chunk.append_columns(properties);
                 yield Ok(chunk);
             }
