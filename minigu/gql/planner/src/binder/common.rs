@@ -1,5 +1,5 @@
 use std::sync::Arc;
-
+use smol_str::ToSmolStr;
 use gql_parser::ast::{
     ElementPattern, ElementPatternFiller, GraphPattern, GraphPatternBindingTable, LabelExpr,
     MatchMode, PathMode, PathPattern, PathPatternExpr, PathPatternPrefix,
@@ -160,7 +160,7 @@ impl Binder<'_> {
                     .ok_or_else(|| BindError::CurrentGraphNotSpecified)?;
                 // To handle.
                 let id = graph.graph_type().get_label_id(name)?.ok_or_else(
-                    || BindError::LabelIdNotExists(name.into())
+                    || BindError::LabelNotFound(name.to_smolstr())
                 )?;
                 Ok(BoundLabelExpr::Label(id))
             }
