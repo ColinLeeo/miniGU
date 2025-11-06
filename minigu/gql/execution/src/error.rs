@@ -11,7 +11,7 @@ pub enum ExecutionError {
 
     #[error(transparent)]
     Custom(#[from] Box<dyn Error + Send + Sync + 'static>),
-
+    
     #[error(transparent)]
     #[diagnostic(transparent)]
     NotImplemented(#[from] NotImplemented),

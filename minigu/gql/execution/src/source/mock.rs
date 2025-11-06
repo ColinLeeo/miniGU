@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::array::{Array, ArrayRef, StringArray};
-use minigu_common::types::{VertexId, VertexIdArray};
+use minigu_common::types::{PropertyId, VertexId, VertexIdArray};
 
 use super::{ExpandSource, VertexPropertySource};
 use crate::error::ExecutionResult;
@@ -117,7 +117,7 @@ impl MockVertexPropertySource {
 }
 
 impl VertexPropertySource for MockVertexPropertySource {
-    fn scan_vertex_properties(&self, vertices: &VertexIdArray) -> ExecutionResult<Vec<ArrayRef>> {
+    fn scan_vertex_properties(&self, vertices: &VertexIdArray, _prop_list: &Vec<PropertyId>) -> ExecutionResult<Vec<ArrayRef>> {
         assert!(!vertices.is_nullable());
         let properties = StringArray::from_iter(
             vertices

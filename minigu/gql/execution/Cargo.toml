@@ -14,8 +14,13 @@ minigu-catalog = { workspace = true }
 minigu-common = { workspace = true }
 minigu-context = { workspace = true }
 minigu-planner = { workspace = true }
+minigu-transaction = {workspace = true}
+minigu-storage = {workspace = true}
 rayon = { workspace = true }
 thiserror = { workspace = true }
+ordered-float = "5.0.0"
+temp-dir = { workspace = true }
+temp-file = {workspace = true}
 
 [lints]
 workspace = true

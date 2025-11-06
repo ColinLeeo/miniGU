@@ -1,4 +1,5 @@
 use arrow::array::AsArray;
+use minigu_common::types::PropertyId;
 
 use super::utils::gen_try;
 use super::{Executor, IntoExecutor};
@@ -9,14 +10,16 @@ pub struct VertexPropertyScanBuilder<E, S> {
     child: E,
     input_column_index: usize,
     source: S,
+    prop_ids: Vec<PropertyId>,
 }
 
 impl<E, S> VertexPropertyScanBuilder<E, S> {
-    pub fn new(child: E, input_column_index: usize, source: S) -> Self {
+    pub fn new(child: E, input_column_index: usize, source: S, prop_ids: Vec<PropertyId>) -> Self {
         Self {
             child,
             input_column_index,
             source,
+            prop_ids,
         }
     }
 }
@@ -34,6 +37,7 @@ where
                 child,
                 input_column_index,
                 source,
+                prop_ids,
             } = self;
             for chunk in child.into_iter() {
                 let mut chunk = gen_try!(chunk);
@@ -47,7 +51,7 @@ where
                     .get(input_column_index)
                     .expect("column with `input_column_index` should exist");
                 let input_column = input_column.as_primitive();
-                let properties = gen_try!(source.scan_vertex_properties(input_column, None));
+                let properties = gen_try!(source.scan_vertex_properties(input_column, &prop_ids));
                 chunk.append_columns(properties);
                 yield Ok(chunk);
             }
@@ -82,7 +86,7 @@ mod tests {
         );
         let chunk: DataChunk = [Ok(chunk)]
             .into_executor()
-            .scan_vertex_property(0, build_test_source())
+            .scan_vertex_property(0, build_test_source(), Vec::new())
             .into_iter()
             .try_collect()
             .unwrap();
