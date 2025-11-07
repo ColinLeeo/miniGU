@@ -86,12 +86,6 @@ impl GraphContainer {
 
         Ok(Box::new(iter))
     }
-
-    fn scan_vertex_properties(
-        &self,
-        vertices: &VertexIdArray,
-        props: Option<&[String]>,
-    ) -> ExecutionResult<Vec<ArrayRef>>
 }
 
 impl Debug for GraphContainer {

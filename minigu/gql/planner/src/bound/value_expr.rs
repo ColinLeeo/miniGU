@@ -22,7 +22,7 @@ impl Display for BoundExprKind {
             // TODO: Use `Display` rather than `Debug` representation for `value`.
             BoundExprKind::Value(value) => write!(f, "{value:?}"),
             BoundExprKind::Variable(variable) => write!(f, "{variable}"),
-            BoundExprKind::Property { base, field, field_idx } => write!(f, "{base:?}: {field:#?}"),
+            BoundExprKind::Property { base, field, field_idx } => write!(f, "{base:?}: {field:#?}, {field_idx:#?}"),
             BoundExprKind::Binary { op, left, right } => {
                 write!(f, "{left:?} {op:?}{right:?}")
             }

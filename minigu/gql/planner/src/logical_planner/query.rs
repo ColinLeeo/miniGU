@@ -3,18 +3,19 @@ use std::sync::Arc;
 use minigu_common::error::not_implemented;
 
 use crate::bound::{
-    BoundCompositeQueryStatement, BoundLinearQueryStatement, BoundMatchStatement,
+    BoundCompositeQueryStatement, BoundExpr, BoundLinearQueryStatement, BoundMatchStatement,
     BoundOrderByAndPageStatement, BoundResultStatement, BoundReturnStatement,
     BoundSimpleQueryStatement,
 };
 use crate::error::PlanResult;
 use crate::logical_planner::LogicalPlanner;
-use crate::plan::PlanNode;
+use crate::plan::filter::Filter;
 use crate::plan::limit::Limit;
 use crate::plan::logical_match::{LogicalMatch, MatchKind};
 use crate::plan::one_row::OneRow;
 use crate::plan::project::Project;
 use crate::plan::sort::Sort;
+use crate::plan::PlanNode;
 
 impl LogicalPlanner {
     pub fn plan_composite_query_statement(
@@ -72,14 +73,24 @@ impl LogicalPlanner {
 
     pub fn plan_match_statement(&self, statement: BoundMatchStatement) -> PlanResult<PlanNode> {
         match statement {
-            BoundMatchStatement::Simple(binding) => {
-                let node = LogicalMatch::new(
+            BoundMatchStatement::Simple(mut binding) => {
+                let pred: Option<BoundExpr> = binding.pattern.predicate.take();
+
+                let match_node = LogicalMatch::new(
                     MatchKind::Simple,
                     binding.pattern,
                     binding.yield_clause,
                     binding.output_schema,
                 );
-                Ok(PlanNode::LogicalMatch(Arc::new(node)))
+                let match_plan = PlanNode::LogicalMatch(Arc::new(match_node));
+
+                if let Some(p) = pred {
+                    Ok(PlanNode::LogicalFilter(Arc::new(Filter::new(
+                        match_plan, p,
+                    ))))
+                } else {
+                    Ok(match_plan)
+                }
             }
             BoundMatchStatement::Optional => not_implemented("match statement optional", None),
         }

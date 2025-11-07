@@ -1,9 +1,13 @@
 use std::sync::Arc;
 
-use minigu_catalog::memory::graph_type::MemoryGraphTypeCatalog;
+use minigu_catalog::label_set::LabelSet;
+use minigu_catalog::memory::graph_type::{
+    MemoryEdgeTypeCatalog, MemoryGraphTypeCatalog, MemoryVertexTypeCatalog,
+};
 use minigu_catalog::named_ref::NamedGraphRef;
+use minigu_catalog::property::Property;
 use minigu_common::data_type::LogicalType;
-use minigu_common::types::{EdgeId, LabelId, VertexId};
+use minigu_common::types::{EdgeId, VertexId};
 use minigu_common::value::ScalarValue;
 use minigu_context::graph::{GraphContainer, GraphStorage};
 use minigu_context::procedure::Procedure;
@@ -43,6 +47,28 @@ pub fn build_procedure() -> Procedure {
         let mut graph_type = MemoryGraphTypeCatalog::new();
         let person_label_id = graph_type.add_label("PERSON".to_string()).unwrap();
         let friend_label_id = graph_type.add_label("FRIEND".to_string()).unwrap();
+        let person_label_set: LabelSet = vec![person_label_id].into_iter().collect();
+        let person = Arc::new(MemoryVertexTypeCatalog::new(
+            person_label_set.clone(),
+            vec![
+                Property::new("name".to_string(), LogicalType::String, false),
+                Property::new("age".to_string(), LogicalType::Int8, false),
+            ],
+        ));
+        let friend_label_set: LabelSet = vec![friend_label_id].into_iter().collect();
+        let friend = Arc::new(MemoryEdgeTypeCatalog::new(
+            friend_label_set.clone(),
+            person.clone(),
+            person.clone(),
+            vec![Property::new(
+                "distance".to_string(),
+                LogicalType::Int32,
+                false,
+            )],
+        ));
+
+        graph_type.add_vertex_type(person_label_set, person);
+        graph_type.add_edge_type(friend_label_set, friend);
         let container = Arc::new(GraphContainer::new(
             Arc::new(graph_type),
             GraphStorage::Memory(graph.clone()),
@@ -51,7 +77,6 @@ pub fn build_procedure() -> Procedure {
         if !schema.add_graph(graph_name.clone(), container.clone()) {
             return Err(anyhow::anyhow!("graph `{graph_name}` already exists").into());
         }
-        
 
         context.current_graph = Some(NamedGraphRef::new(graph_name.into(), container.clone()));
 
@@ -66,7 +91,10 @@ pub fn build_procedure() -> Procedure {
             let vertex = Vertex::new(
                 VertexId::from(_i),
                 person_label_id,
-                PropertyRecord::new(vec![ScalarValue::String(Some("per".to_string()))]),
+                PropertyRecord::new(vec![
+                    ScalarValue::String(Some(format!("bob{}", _i).to_string())),
+                    ScalarValue::Int8(Some(20 + _i as i8)),
+                ]),
             );
             mem.create_vertex(&txn, vertex);
             id_map.push(_i);
@@ -85,13 +113,12 @@ pub fn build_procedure() -> Procedure {
                     src,
                     dst,
                     friend_label_id,
-                    PropertyRecord::new(vec![ScalarValue::String(Some("2024-03-01".to_string()))]),
+                    PropertyRecord::new(vec![ScalarValue::Int32(Some(i as i32 * j as i32))]),
                 );
                 mem.create_edge(&txn, edge);
                 created_edges += 1;
             }
         }
-        // txn.commit().unwrap();
         txn.commit()?;
         Ok(vec![])
     })

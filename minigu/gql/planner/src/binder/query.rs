@@ -124,7 +124,6 @@ impl Binder<'_> {
         &mut self,
         statement: &SimpleQueryStatement,
     ) -> BindResult<BoundSimpleQueryStatement> {
-        eprintln!("== SimpleQueryStatement ==\n{:#?}", statement);
         match statement {
             SimpleQueryStatement::Match(statement) => {
                 let statement = self.bind_match_statement(statement)?;

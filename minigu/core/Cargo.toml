@@ -28,6 +28,7 @@ rayon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+smallvec = "1.15.1"
 
 [lints]
 workspace = true
