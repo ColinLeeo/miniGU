@@ -16,7 +16,7 @@ use crate::common::wal::graph_wal::RedoEntry;
 use crate::tp::checkpoint::GraphCheckpoint;
 
 /// Record header size: 4 bytes length + 4 bytes CRC.
-const RECORD_HEADER_SIZE: usize = 8;
+const RECORD_HEADER_SIZE: usize = 12; // 8 bytes len (u64) + 4 bytes crc (u32)
 
 /// A single database file containing checkpoint and WAL regions.
 ///
@@ -151,9 +151,9 @@ impl DbFile {
             .seek(SeekFrom::Start(self.header.checkpoint_offset))?;
 
         // Read length and checksum
-        let mut len_bytes = [0u8; 4];
+        let mut len_bytes = [0u8; 8];
         self.file.read_exact(&mut len_bytes)?;
-        let len = u32::from_le_bytes(len_bytes) as usize;
+        let len = u64::from_le_bytes(len_bytes) as usize;
 
         let mut crc_bytes = [0u8; 4];
         self.file.read_exact(&mut crc_bytes)?;
@@ -193,7 +193,7 @@ impl DbFile {
         hasher.update(&payload);
         let crc = hasher.finalize();
 
-        let len = payload.len() as u32;
+        let len = payload.len() as u64;
         let total_size = RECORD_HEADER_SIZE + payload.len();
 
         // Write checkpoint at the designated offset
@@ -248,7 +248,7 @@ impl DbFile {
         hasher.update(&payload);
         let crc = hasher.finalize();
 
-        let len = payload.len() as u32;
+        let len = payload.len() as u64;
         let entry_size = RECORD_HEADER_SIZE + payload.len();
 
         // Seek to end of WAL region
@@ -319,7 +319,7 @@ impl DbFile {
             self.file.seek(SeekFrom::Start(current_offset))?;
 
             // Read length and checksum
-            let mut len_bytes = [0u8; 4];
+            let mut len_bytes = [0u8; 8];
             match self.file.read_exact(&mut len_bytes) {
                 Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
@@ -335,7 +335,7 @@ impl DbFile {
                 }
                 Err(e) => return Err(e.into()),
             }
-            let len = u32::from_le_bytes(len_bytes) as usize;
+            let len = u64::from_le_bytes(len_bytes) as usize;
 
             let mut crc_bytes = [0u8; 4];
             self.file.read_exact(&mut crc_bytes)?;

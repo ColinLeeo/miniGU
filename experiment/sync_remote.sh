@@ -20,20 +20,18 @@ set -euo pipefail
 # ============================================================
 # 配置区 — 请根据实际情况修改
 # ============================================================
-REMOTE_USER="shuolin"                          # 远程用户名
-REMOTE_HOST="103.233.162.227"                  # 远程 IP / 主机名
-REMOTE_PORT="10023"                             # SSH 端口
-REMOTE_DIR="/home/shuolin/HELMDB_TAS"              # 远程项目目录
+REMOTE_HOST="basics-dev"                       # SSH config 中的 Host 别名
+REMOTE_DIR="/home/shuolin/miniGU"              # 远程项目目录
 LOCAL_DIR="$(cd "$(dirname "$0")/.." && pwd)"   # 本地项目根目录（脚本上一级）
 
-# SSH 选项（复用连接，加速多次操作）
-SSH_OPTS="-o ControlMaster=auto -o ControlPath=/tmp/ssh-%r@%h:%p -o ControlPersist=600 -p ${REMOTE_PORT}"
+# SSH 选项（复用连接，加速多次操作；用户名/端口/跳板机由 ~/.ssh/config 管理）
+SSH_OPTS="-o ControlMaster=auto -o ControlPath=/tmp/ssh-minigu-%C -o ControlPersist=600"
 
-# 远程编译命令 — 根据你的项目实际情况修改
-BUILD_CMD="cd ${REMOTE_DIR} && bash build.sh -3rd ~/3rds/Helmdb-third_party_binarylibs "
+# 远程编译命令
+BUILD_CMD="cd ${REMOTE_DIR} && cargo build --release --bin=minigu"
 
-# # 远程测试命令 — 根据你的项目实际情况修改
-# TEST_CMD="cd ${REMOTE_DIR} && make check 2>&1 | tail -100"
+# 远程测试命令
+TEST_CMD="cd ${REMOTE_DIR} && cargo test 2>&1 | tail -100"
 
 # ============================================================
 # rsync 排除规则（基于 .gitignore + 额外排除）
@@ -45,37 +43,33 @@ RSYNC_EXCLUDES=(
     # IDE / 编辑器
     ".vscode/"
     ".idea/"
-    ".gitee/"
     "*.DS_Store"
 
-    # 构建产物
-    "cmake-build-debug/"
-    "tmp_build/"
-    "output/"
-    "mppdb_temp_install/"
-    "build/.cache"
-    "build/compile_commands.json"
-    "dest/"
-    "gaussdata/"
-    "GNUmakefile"
-    "config.status"
+    # Rust / Cargo 构建产物
+    "target/"
 
-    # 编译中间文件
-    "*.o"
-    "*.a"
-    "*.so"
-    "*.so.*"
+    # 实验数据（大文件，远程应已有或单独准备）
+    "experiment/dataset/ldbc/sf*/minigu_db/"
+    "experiment/dataset/ldbc/sf*/*.csv"
+    "experiment/duckdb"
+
+    # 实验结果
+    "experiment/result/"
+
+    # baseline 编译产物（远程构建，不要删除）
+    "experiment/baseline/gcare/build/"
+    "experiment/baseline/pathce/target/"
+    "experiment/baseline/glogs/ir/target/"
+    "experiment/baseline/color/Manifest.toml"
+
+    # baseline 准备的数据产物
+    "experiment/catalogs/"
+    "experiment/graphs/"
+    "experiment/dataset/ldbc/sf*.txt"
+    "experiment/dataset/ldbc/sf*.graph*"
 
     # 日志
     "*.log"
-    "logfile"
-
-    # 其他
-    "*.prof"
-    "config.mk"
-    "objfiles.txt"
-    "make_compile.sh"
-    "ereport.txt"
 )
 
 # ============================================================
@@ -83,7 +77,7 @@ RSYNC_EXCLUDES=(
 # ============================================================
 
 _ssh() {
-    ssh ${SSH_OPTS} "${REMOTE_USER}@${REMOTE_HOST}" "$@"
+    ssh ${SSH_OPTS} "${REMOTE_HOST}" "$@"
 }
 
 _build_exclude_args() {
@@ -95,7 +89,7 @@ _build_exclude_args() {
 }
 
 cmd_sync() {
-    echo ">>> 同步代码到 ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_DIR}"
+    echo ">>> 同步代码到 ${REMOTE_HOST}:${REMOTE_DIR}"
     echo "    本地: ${LOCAL_DIR}"
 
     # 确保远程目录存在
@@ -106,7 +100,7 @@ cmd_sync() {
         $(_build_exclude_args) \
         "$@" \
         "${LOCAL_DIR}/" \
-        "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_DIR}/"
+        "${REMOTE_HOST}:${REMOTE_DIR}/"
 
     echo ">>> 同步完成"
 }
@@ -146,7 +140,7 @@ cmd_sync_changed() {
             fi
             rsync -avz -e "ssh ${SSH_OPTS}" \
                 "${LOCAL_DIR}/${file}" \
-                "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_DIR}/${file}"
+                "${REMOTE_HOST}:${REMOTE_DIR}/${file}"
         fi
     done
 
@@ -168,7 +162,7 @@ cmd_test() {
 }
 
 cmd_ssh() {
-    echo ">>> SSH 连接到 ${REMOTE_USER}@${REMOTE_HOST}"
+    echo ">>> SSH 连接到 ${REMOTE_HOST}"
     _ssh
 }
 
@@ -177,7 +171,7 @@ cmd_pull() {
     echo ">>> 从远程拉取: ${remote_path}"
     rsync -avz \
         -e "ssh ${SSH_OPTS}" \
-        "${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_DIR}/${remote_path}" \
+        "${REMOTE_HOST}:${REMOTE_DIR}/${remote_path}" \
         "${LOCAL_DIR}/${remote_path}"
     echo ">>> 拉取完成"
 }

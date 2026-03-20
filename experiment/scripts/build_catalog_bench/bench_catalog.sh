@@ -39,12 +39,12 @@ GRAPH_NAME="ldbc"
 # Max path length for create_catalog
 MAX_K=2
 
-# Build modes: 0 = layer-by-layer, 1 = neighbor-cached dependency-driven
-MODES=(0 1)
-MODE_NAMES=("layer-by-layer" "neighbor-cached")
+# Build mode: 1 = neighbor-cached dependency-driven
+MODE=1
+MODE_NAME="neighbor-cached"
 
 # Thread counts to test
-THREAD_COUNTS=(1 2 4 8 16)
+THREAD_COUNTS=(1 2 4 8 16 32)
 
 # Number of repetitions per configuration
 REPEATS=3
@@ -52,11 +52,15 @@ REPEATS=3
 # Memory sampling interval in seconds
 MEM_SAMPLE_INTERVAL=1
 
+# Result output directory
+RESULT_DIR="$PROJECT_DIR/experiment/result/build_catalog"
+mkdir -p "$RESULT_DIR"
+
 # Output CSV
-OUTPUT_CSV="$SCRIPT_DIR/bench_catalog_results.csv"
+OUTPUT_CSV="$RESULT_DIR/bench_catalog_results.csv"
 
 # Memory trace output directory
-MEM_TRACE_DIR="$SCRIPT_DIR/mem_traces"
+MEM_TRACE_DIR="$RESULT_DIR/mem_traces"
 mkdir -p "$MEM_TRACE_DIR"
 
 # Temp directory for scripts
@@ -102,18 +106,17 @@ start_mem_sampler() {
 run_single_bench() {
     local db_path="$1"
     local sf="$2"
-    local mode="$3"
-    local threads="$4"
-    local repeat="$5"
+    local threads="$3"
+    local repeat="$4"
 
-    local config_name="${sf}_m${mode}_t${threads}_r${repeat}"
+    local config_name="${sf}_m${MODE}_t${threads}_r${repeat}"
 
     # Generate the GQL script for this run
     # Use :time to get precise wall-clock timing from minigu itself
     local script_file="$TMP_DIR/bench_${config_name}.gql"
     cat > "$script_file" <<EOGQL
 session set graph ${GRAPH_NAME}
-:time call create_catalog("${GRAPH_NAME}", ${MAX_K}, ${mode}, ${threads})
+:time call create_catalog("${GRAPH_NAME}", ${MAX_K}, ${MODE}, ${threads})
 EOGQL
 
     # Output files
@@ -139,6 +142,12 @@ EOGQL
         sleep 0.2
     done
 
+    # Record baseline RSS right after graph loading, before catalog construction
+    local baseline_rss_kb
+    baseline_rss_kb=$(ps -o rss= -p "$minigu_pid" 2>/dev/null | tr -d ' ')
+    local baseline_mem_mb
+    baseline_mem_mb=$(python3 -c "print(round(${baseline_rss_kb:-0} / 1024, 2))")
+
     # Start memory sampler only after catalog construction begins
     local sampler_pid
     sampler_pid=$(start_mem_sampler "$minigu_pid" "$mem_csv")
@@ -150,9 +159,9 @@ EOGQL
     kill "$sampler_pid" 2>/dev/null || true
     wait "$sampler_pid" 2>/dev/null || true
 
-    # Parse wall clock time from minigu :time output (stderr): "Time: 12.345s"
+    # Parse wall clock time from Rust output (stdout): "Catalog build time: 12.345s"
     local wall_s
-    wall_s=$(grep -o 'Time: [0-9.]*s' "$time_output" | head -1 | grep -o '[0-9.]*') || wall_s=0
+    wall_s=$(grep -o 'Catalog build time: [0-9.]*s' "$stdout_output" | grep -o '[0-9.]*') || wall_s=0
     local wall_ms
     wall_ms=$(python3 -c "print(round($wall_s * 1000, 2))")
 
@@ -176,11 +185,21 @@ EOGQL
     local stat_size_mb
     stat_size_mb=$(python3 -c "print(round($stat_size_bytes / 1024 / 1024, 4))" 2>/dev/null || echo "0")
 
+    # Parse compressed statistic size from stdout
+    local compressed_size_bytes
+    compressed_size_bytes=$(grep "Compressed statistic size:" "$stdout_output" | grep -o '[0-9]* bytes' | awk '{print $1}') || compressed_size_bytes=0
+    local compressed_size_mb
+    compressed_size_mb=$(python3 -c "print(round($compressed_size_bytes / 1024 / 1024, 4))" 2>/dev/null || echo "0")
+
+    # Compute catalog-only memory (algorithm overhead)
+    local catalog_mem_mb
+    catalog_mem_mb=$(python3 -c "print(round($peak_mem_mb - $baseline_mem_mb, 2))")
+
     # Parse thread count actually used
     local actual_threads
     actual_threads=$(grep "Using .* rayon threads" "$stdout_output" | grep -o 'Using [0-9]*' | awk '{print $2}') || actual_threads="$threads"
 
-    echo "$sf,$mode,${MODE_NAMES[$mode]},$threads,$actual_threads,$repeat,$wall_ms,$peak_mem_mb,$stat_size_bytes,$stat_size_mb"
+    echo "$sf,$threads,$actual_threads,$repeat,$wall_ms,$peak_mem_mb,$baseline_mem_mb,$catalog_mem_mb,$stat_size_mb,$compressed_size_mb"
 }
 
 # ============================================================================
@@ -191,7 +210,7 @@ log "Starting catalog benchmark"
 log "Binary: $MINIGU"
 log "DB base dir: $DB_BASE_DIR"
 log "Scale factors: ${SCALE_FACTORS[*]}"
-log "Modes: ${MODES[*]}"
+log "Mode: $MODE_NAME"
 log "Thread counts: ${THREAD_COUNTS[*]}"
 log "Repeats: $REPEATS"
 log "Output: $OUTPUT_CSV"
@@ -205,7 +224,7 @@ if [[ ! -x "$MINIGU" ]]; then
 fi
 
 # Write CSV header
-echo "sf,mode,mode_name,threads,actual_threads,repeat,wall_time_ms,peak_mem_mb,stat_size_bytes,stat_size_mb" > "$OUTPUT_CSV"
+echo "sf,threads,actual_threads,repeat,wall_time_ms,peak_mem_mb,baseline_mem_mb,catalog_mem_mb,stat_size_mb,compressed_size_mb" > "$OUTPUT_CSV"
 
 total_runs=0
 completed_runs=0
@@ -214,10 +233,8 @@ completed_runs=0
 for sf in "${SCALE_FACTORS[@]}"; do
     db_path="$DB_BASE_DIR/$sf/minigu_db"
     [[ -d "$db_path" ]] || continue
-    for mode in "${MODES[@]}"; do
-        for threads in "${THREAD_COUNTS[@]}"; do
-            total_runs=$((total_runs + REPEATS))
-        done
+    for threads in "${THREAD_COUNTS[@]}"; do
+        total_runs=$((total_runs + REPEATS))
     done
 done
 
@@ -233,16 +250,14 @@ for sf in "${SCALE_FACTORS[@]}"; do
 
     log "=== Scale Factor: $sf ==="
 
-    for mode in "${MODES[@]}"; do
-        for threads in "${THREAD_COUNTS[@]}"; do
-            for repeat in $(seq 1 "$REPEATS"); do
-                completed_runs=$((completed_runs + 1))
-                log "[$completed_runs/$total_runs] sf=$sf mode=${MODE_NAMES[$mode]} threads=$threads repeat=$repeat"
+    for threads in "${THREAD_COUNTS[@]}"; do
+        for repeat in $(seq 1 "$REPEATS"); do
+            completed_runs=$((completed_runs + 1))
+            log "[$completed_runs/$total_runs] sf=$sf mode=$MODE_NAME threads=$threads repeat=$repeat"
 
-                result=$(run_single_bench "$db_path" "$sf" "$mode" "$threads" "$repeat")
-                echo "$result" >> "$OUTPUT_CSV"
-                echo "  -> $result"
-            done
+            result=$(run_single_bench "$db_path" "$sf" "$threads" "$repeat")
+            echo "$result" >> "$OUTPUT_CSV"
+            echo "  -> $result"
         done
     done
 done

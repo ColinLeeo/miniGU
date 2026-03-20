@@ -21,8 +21,8 @@ const LEN_LABEL: usize = 4; // LabelId as u32
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct LabelStatistic {
     /// 该 label 对应的节点 id；长度与所有 path_statistic 里 block.bucket_ids 总长一致。
-    vertex_ids: VertexVec,
-    path_statistic: HashMap<AltKey, BlockStatistic>,
+    pub(crate) vertex_ids: VertexVec,
+    pub(crate) path_statistic: HashMap<AltKey, BlockStatistic>,
 }
 
 /// AltKey 序列化占用：8 (段数) + 每段 (8 + utf8 字节数)
@@ -216,6 +216,11 @@ impl Statistic {
             }
         }
         total
+    }
+
+    /// Print per-component compression report.
+    pub fn report_compressed_sizes(&self) {
+        super::compression::report_component_sizes(self);
     }
 }
 

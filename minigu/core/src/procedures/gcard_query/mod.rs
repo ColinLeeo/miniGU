@@ -2,6 +2,7 @@ mod abs_graph;
 mod block_statistic;
 mod catalog;
 pub mod compact_update_log;
+pub mod compression;
 pub mod create_catalog;
 mod degreepiecewise;
 mod statistic;
@@ -71,9 +72,10 @@ pub fn build_procedure() -> Procedure {
     let parameters = vec![
         LogicalType::String,  // query_json_path
         LogicalType::Int8,    // max_path_length (K)
-        LogicalType::Int32,   // simple time
+        LogicalType::Int32,   // sample_size
         LogicalType::UInt8,   // predicate apply type
-        LogicalType::Boolean, //
+        LogicalType::Boolean, // verbose
+        LogicalType::Int32,   // max_subgraphs (optional, default 50)
     ];
 
     let schema = Arc::new(DataSchema::new(vec![DataField::new(
@@ -153,9 +155,15 @@ pub fn build_procedure() -> Procedure {
                 )
             })?;
 
+        let max_subgraphs = args
+            .get(5)
+            .and_then(|a| a.to_i32().ok())
+            .map(|n| if n <= 0 { 50 } else { n as usize })
+            .unwrap_or(50);
+
         let cardinality = match query_graph.build_abstract_graph(
             max_path_length,
-            50,
+            max_subgraphs,
             &metadata,
             Some(container),
             simple_size,

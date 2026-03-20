@@ -21,7 +21,7 @@ for sf in ${scale_factors[@]}; do
     -e SPARK_CONF_DIR=/conf \
     ldbc/datagen-standalone:0.5.1-19-829b7a04-2.12_spark3.2 \
     --parallelism $PARALLELISM \
-    --memory 6g \
+    --memory 32g \
     -- \
     --format parquet \
     --scale-factor $sf \

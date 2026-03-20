@@ -2,7 +2,7 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::Arc;
 
 use minigu_catalog::provider::{GraphTypeProvider, PropertiesProvider};
-use minigu_common::types::{EdgeId, VertexId};
+use minigu_common::types::{EdgeId, LabelId, VertexId};
 use minigu_common::value::ScalarValue;
 use minigu_context::graph::GraphContainer;
 use minigu_storage::common::iterators::AdjacencyIteratorTrait;
@@ -663,6 +663,9 @@ impl QueryGraph {
                 GCardError::InvalidData(format!("Label {} not found in graph type", src_label))
             })?;
 
+        // Pre-compile the path query: resolve all label IDs and property indices once
+        let compiled = CompiledPathQuery::compile(&path_query, graph_type.as_ref())?;
+
         let mem = match graph_container.graph_storage() {
             minigu_context::graph::GraphStorage::Memory(m) => Arc::clone(m),
         };
@@ -678,23 +681,17 @@ impl QueryGraph {
         let mut count = 0;
 
         {
-            let it = txn.iter_vertices().filter(|v| {
-                v.as_ref()
-                    .map(|v| v.label_id == src_label_id)
-                    .unwrap_or(false)
-            });
-            for vertex_result in it {
-                let vertex = vertex_result.map_err(|e| {
-                    GCardError::InvalidData(format!("Failed to get vertex: {:?}", e))
-                })?;
-
+            for (vid, label_id) in txn.iter_vertex_ids() {
+                if label_id != src_label_id {
+                    continue;
+                }
                 count += 1;
                 if sampled_starts.len() < sample_size {
-                    sampled_starts.push(vertex.vid());
+                    sampled_starts.push(vid);
                 } else {
                     let j = rng.gen_range(0..count);
                     if j < sample_size {
-                        sampled_starts[j] = vertex.vid();
+                        sampled_starts[j] = vid;
                     }
                 }
             }
@@ -719,9 +716,57 @@ impl QueryGraph {
         let mut sum_pred_weight_seq: f64 = 0.0;
         let mut sum_cross_weight: f64 = 0.0;
 
+        const PILOT_WALKS: usize = 5;
+        const MAX_WALKS: usize = 50;
+        const CV_THRESHOLD: f64 = 0.3;
+
         for start_vid in sampled_starts {
-            let (struct_weight, pred_weight) =
-                self.execute_path_query(&mem, &txn, &path_query, start_vid, graph_type.as_ref())?;
+            let mut walk_struct: Vec<f64> = Vec::with_capacity(PILOT_WALKS);
+            let mut walk_pred: Vec<f64> = Vec::with_capacity(PILOT_WALKS);
+
+            for _ in 0..PILOT_WALKS {
+                let (sw, pw) = self.execute_compiled_walk(
+                    &mem, &txn, &compiled, start_vid, &mut rng,
+                )?;
+                walk_struct.push(sw);
+                walk_pred.push(pw);
+            }
+
+            let pilot_mean: f64 =
+                walk_struct.iter().sum::<f64>() / walk_struct.len() as f64;
+            let need_more = if pilot_mean > 0.0 {
+                let variance: f64 = walk_struct
+                    .iter()
+                    .map(|&w| (w - pilot_mean) * (w - pilot_mean))
+                    .sum::<f64>()
+                    / (walk_struct.len() as f64 - 1.0).max(1.0);
+                let cv = variance.sqrt() / pilot_mean;
+                cv > CV_THRESHOLD
+            } else {
+                false
+            };
+
+            if need_more {
+                let extra = MAX_WALKS - PILOT_WALKS;
+                for _ in 0..extra {
+                    let (sw, pw) = self.execute_compiled_walk(
+                        &mem, &txn, &compiled, start_vid, &mut rng,
+                    )?;
+                    walk_struct.push(sw);
+                    walk_pred.push(pw);
+                }
+            }
+
+            let total_walks = walk_struct.len() as f64;
+            let start_struct_sum: f64 = walk_struct.iter().sum();
+            let start_pred_sum: f64 = walk_pred.iter().sum();
+
+            if start_struct_sum <= 0.0 {
+                continue;
+            }
+
+            let struct_weight = start_struct_sum / total_walks;
+            let pred_weight = start_pred_sum / total_walks;
 
             if struct_weight > 0.0 {
                 struct_success_sample_count += 1;
@@ -857,223 +902,122 @@ impl QueryGraph {
         })
     }
 
-    /// 全采样：迭代维护两个集合，无递归
-    /// - Set 1 (struct_matched): 结构性匹配的节点
-    /// - Set 2 (pred_matched): 结构性匹配且 predicate 通过的节点
-    /// 最终结果 = |Set 2| / |Set 1|
-    fn execute_path_query(
+    /// Optimized WanderJoin walk using pre-compiled path query.
+    ///
+    /// All label IDs and property indices are resolved once in `CompiledPathQuery`,
+    /// so each walk only does DashMap lookups and adjacency iteration.
+    ///
+    /// - Uses `get_vertex_label_id` (no property clone) for label checks
+    /// - Only calls `get_vertex` when predicates actually need evaluation
+    /// - Reuses the caller's `rng` instead of creating one per walk
+    fn execute_compiled_walk(
         &self,
         mem: &Arc<MemoryGraph>,
         txn: &Arc<MemTransaction>,
-        path_query: &PathQuery,
+        compiled: &CompiledPathQuery,
         start_vertex: VertexId,
-        graph_type: &dyn GraphTypeProvider,
+        rng: &mut impl rand::Rng,
     ) -> GCardResult<(f64, f64)> {
-        let path_elements = &path_query.path_elements;
-        if path_elements.is_empty() {
+        if compiled.steps.is_empty() {
             return Ok((1.0, 1.0));
         }
 
-        let mut struct_matched = HashSet::from([start_vertex]);
-        let mut pred_matched = HashSet::from([start_vertex]);
+        let mut current_vid = start_vertex;
+        let mut weight: f64 = 1.0;
+        let mut pred_ok = true;
 
-        for path_index in 0..path_elements.len() {
-            let element = &path_elements[path_index];
+        for step in &compiled.steps {
+            match step {
+                CompiledStep::Vertex { label_id, predicates } => {
+                    // Lightweight label check — no property clone
+                    let actual_label = match mem.get_vertex_label_id(txn, current_vid) {
+                        Ok(lid) => lid,
+                        Err(_) => return Ok((0.0, 0.0)),
+                    };
+                    if actual_label != *label_id {
+                        return Ok((0.0, 0.0));
+                    }
 
-            match element {
-                PathElement::Vertex { label, position } => {
-                    // 匹配点：检查 Set 2 中符合 vertex predicate 的，不满足的舍弃
-                    let label_id = graph_type
-                        .get_label_id(label)
-                        .map_err(|e| {
-                            GCardError::InvalidData(format!(
-                                "Failed to get label_id for {}: {:?}",
-                                label, e
-                            ))
-                        })?
-                        .ok_or_else(|| {
-                            GCardError::InvalidData(format!("Label {} not found", label))
-                        })?;
-
-                    pred_matched = pred_matched
-                        .into_iter()
-                        .filter(|&vid| {
-                            let vertex = match mem.get_vertex(txn, vid) {
-                                Ok(v) => v,
-                                Err(_) => return false,
-                            };
-                            if vertex.label_id != label_id {
-                                return false;
-                            }
-                            if let Some(predicates) = path_query.vertex_predicates.get(position) {
-                                match self
-                                    .evaluate_predicates_for_vertex(&vertex, predicates, graph_type)
-                                {
-                                    Ok(ok) => ok,
-                                    Err(_) => false,
+                    // Only load full vertex if we have predicates to check
+                    if pred_ok && !predicates.is_empty() {
+                        let vertex = match mem.get_vertex(txn, current_vid) {
+                            Ok(v) => v,
+                            Err(_) => return Ok((0.0, 0.0)),
+                        };
+                        for rp in predicates {
+                            if let Some(prop_value) = vertex.properties().get(rp.prop_index) {
+                                if !self.compare_values(prop_value, &rp.op, &rp.value)? {
+                                    pred_ok = false;
+                                    break;
                                 }
                             } else {
-                                true
+                                pred_ok = false;
+                                break;
                             }
-                        })
-                        .collect();
+                        }
+                    }
                 }
-                PathElement::Edge {
-                    label,
-                    position,
-                    direction,
-                } => {
-                    let edge_label_id = graph_type
-                        .get_label_id(label)
-                        .map_err(|e| {
-                            GCardError::InvalidData(format!(
-                                "Failed to get label_id for {}: {:?}",
-                                label, e
-                            ))
-                        })?
-                        .ok_or_else(|| {
-                            GCardError::InvalidData(format!("Label {} not found", label))
-                        })?;
+                CompiledStep::Edge { label_id, direction, predicates } => {
+                    let edge_label_id = *label_id;
 
-                    let mut new_struct_matched = HashSet::new();
-                    let mut new_pred_matched = HashSet::new();
+                    // Reservoir sampling: pick a random matching neighbor in one pass
+                    // without collecting all neighbors into a Vec.
+                    let mut chosen_neighbor_id: VertexId = 0;
+                    let mut chosen_eid: EdgeId = 0;
+                    let mut degree: usize = 0;
 
-                    for &from_vid in &struct_matched {
-                        let mut adj_iter = match direction {
-                            EdgeDirection::Outgoing => txn.iter_adjacency_outgoing(from_vid),
-                            EdgeDirection::Incoming => txn.iter_adjacency_incoming(from_vid),
-                        };
-                        adj_iter = AdjacencyIteratorTrait::filter(adj_iter, move |neighbor| {
-                            neighbor.label_id() == edge_label_id
-                        });
+                    let adj_iter = match direction {
+                        EdgeDirection::Outgoing => txn.iter_adjacency_outgoing(current_vid),
+                        EdgeDirection::Incoming => txn.iter_adjacency_incoming(current_vid),
+                    };
+                    let adj_iter = AdjacencyIteratorTrait::filter(adj_iter, move |neighbor| {
+                        neighbor.label_id() == edge_label_id
+                    });
 
-                        for neighbor_result in adj_iter {
-                            let neighbor = match neighbor_result {
-                                Ok(n) => n,
-                                Err(_) => continue,
-                            };
-                            let to_vid = neighbor.neighbor_id();
-                            new_struct_matched.insert(to_vid);
-
-                            if pred_matched.contains(&from_vid) {
-                                let edge_predicate_satisfied = if let Some(predicates) =
-                                    path_query.edge_predicates.get(position)
-                                {
-                                    match mem.get_edge(txn, neighbor.eid()) {
-                                        Ok(edge) => self
-                                            .evaluate_predicates_for_edge(
-                                                &edge, predicates, graph_type,
-                                            )
-                                            .unwrap_or(false),
-                                        Err(_) => false,
-                                    }
-                                } else {
-                                    true
-                                };
-                                if edge_predicate_satisfied {
-                                    new_pred_matched.insert(to_vid);
-                                }
+                    for neighbor_result in adj_iter {
+                        if let Ok(n) = neighbor_result {
+                            degree += 1;
+                            // Reservoir sampling: keep item with probability 1/degree
+                            if degree == 1 || rng.gen_range(0..degree) == 0 {
+                                chosen_neighbor_id = n.neighbor_id();
+                                chosen_eid = n.eid();
                             }
                         }
                     }
 
-                    struct_matched = new_struct_matched;
-                    pred_matched = new_pred_matched;
+                    if degree == 0 {
+                        return Ok((0.0, 0.0)); // dead end
+                    }
 
-                    if struct_matched.is_empty() {
-                        return Ok((0.0, 0.0));
+                    weight *= degree as f64;
+                    current_vid = chosen_neighbor_id;
+
+                    // Check edge predicates on the chosen edge
+                    if pred_ok && !predicates.is_empty() {
+                        match mem.get_edge(txn, chosen_eid) {
+                            Ok(edge) => {
+                                for rp in predicates {
+                                    if let Some(prop_value) = edge.properties.get(rp.prop_index) {
+                                        if !self.compare_values(prop_value, &rp.op, &rp.value)? {
+                                            pred_ok = false;
+                                            break;
+                                        }
+                                    } else {
+                                        pred_ok = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            Err(_) => pred_ok = false,
+                        }
                     }
                 }
             }
         }
 
-        let struct_count = struct_matched.len() as f64;
-        let pred_count = pred_matched.len() as f64;
-        Ok((struct_count, pred_count))
-    }
-
-    fn evaluate_predicates_for_vertex(
-        &self,
-        vertex: &Vertex,
-        predicates: &[PredicateDef],
-        graph_type: &dyn GraphTypeProvider,
-    ) -> GCardResult<bool> {
-        let label_set = minigu_catalog::label_set::LabelSet::from_iter(vec![vertex.label_id]);
-        let vertex_type = graph_type
-            .get_vertex_type(&label_set)
-            .map_err(|e| GCardError::InvalidData(format!("Failed to get vertex type: {:?}", e)))?
-            .ok_or_else(|| {
-                GCardError::InvalidData(format!(
-                    "Vertex type not found for label_id {}",
-                    vertex.label_id
-                ))
-            })?;
-
-        for predicate in predicates {
-            let (prop_id, _) = vertex_type
-                .get_property(&predicate.property)
-                .map_err(|e| {
-                    GCardError::InvalidData(format!(
-                        "Failed to get property {}: {:?}",
-                        predicate.property, e
-                    ))
-                })?
-                .ok_or_else(|| {
-                    GCardError::InvalidData(format!("Property {} not found", predicate.property))
-                })?;
-
-            let prop_value = vertex.properties().get(prop_id as usize).ok_or_else(|| {
-                GCardError::InvalidData(format!("Property index {} out of range", prop_id))
-            })?;
-
-            if !self.compare_values(prop_value, &predicate.op, &predicate.value)? {
-                return Ok(false);
-            }
-        }
-
-        Ok(true)
-    }
-
-    fn evaluate_predicates_for_edge(
-        &self,
-        edge: &Edge,
-        predicates: &[PredicateDef],
-        graph_type: &dyn GraphTypeProvider,
-    ) -> GCardResult<bool> {
-        let label_set = minigu_catalog::label_set::LabelSet::from_iter(vec![edge.label_id]);
-        let edge_type = graph_type
-            .get_edge_type(&label_set)
-            .map_err(|e| GCardError::InvalidData(format!("Failed to get edge type: {:?}", e)))?
-            .ok_or_else(|| {
-                GCardError::InvalidData(format!(
-                    "Edge type not found for label_id {}",
-                    edge.label_id
-                ))
-            })?;
-
-        for predicate in predicates {
-            let (prop_id, _) = edge_type
-                .get_property(&predicate.property)
-                .map_err(|e| {
-                    GCardError::InvalidData(format!(
-                        "Failed to get property {}: {:?}",
-                        predicate.property, e
-                    ))
-                })?
-                .ok_or_else(|| {
-                    GCardError::InvalidData(format!("Property {} not found", predicate.property))
-                })?;
-
-            let prop_value = edge.properties.get(prop_id as usize).ok_or_else(|| {
-                GCardError::InvalidData(format!("Property index {} out of range", prop_id))
-            })?;
-
-            if !self.compare_values(prop_value, &predicate.op, &predicate.value)? {
-                return Ok(false);
-            }
-        }
-
-        Ok(true)
+        let struct_weight = weight;
+        let pred_weight = if pred_ok { weight } else { 0.0 };
+        Ok((struct_weight, pred_weight))
     }
 
     fn compare_values(
@@ -1197,6 +1141,99 @@ enum PathElement {
         position: usize,
         direction: EdgeDirection,
     },
+}
+
+/// Pre-resolved predicate: property index + comparison value + operator.
+#[derive(Clone)]
+struct ResolvedPredicate {
+    prop_index: usize,
+    op: ComparisonOp,
+    value: ScalarValue,
+}
+
+/// Pre-compiled path step with label IDs already resolved.
+#[derive(Clone)]
+enum CompiledStep {
+    Vertex {
+        label_id: LabelId,
+        predicates: Vec<ResolvedPredicate>,
+    },
+    Edge {
+        label_id: LabelId,
+        direction: EdgeDirection,
+        predicates: Vec<ResolvedPredicate>,
+    },
+}
+
+/// A fully compiled path query with all label IDs and property indices pre-resolved.
+struct CompiledPathQuery {
+    steps: Vec<CompiledStep>,
+}
+
+impl CompiledPathQuery {
+    fn compile(
+        path_query: &PathQuery,
+        graph_type: &dyn GraphTypeProvider,
+    ) -> GCardResult<Self> {
+        let mut steps = Vec::with_capacity(path_query.path_elements.len());
+
+        for element in &path_query.path_elements {
+            match element {
+                PathElement::Vertex { label, position } => {
+                    let label_id = graph_type
+                        .get_label_id(label)
+                        .map_err(|e| GCardError::InvalidData(format!("get_label_id {}: {:?}", label, e)))?
+                        .ok_or_else(|| GCardError::InvalidData(format!("Label {} not found", label)))?;
+
+                    let predicates = if let Some(preds) = path_query.vertex_predicates.get(position) {
+                        let label_set = minigu_catalog::label_set::LabelSet::from_iter(vec![label_id]);
+                        let vertex_type = graph_type
+                            .get_vertex_type(&label_set)
+                            .map_err(|e| GCardError::InvalidData(format!("get_vertex_type: {:?}", e)))?
+                            .ok_or_else(|| GCardError::InvalidData(format!("Vertex type not found for {}", label)))?;
+
+                        preds.iter().map(|p| {
+                            let (prop_id, _) = vertex_type.get_property(&p.property)
+                                .map_err(|e| GCardError::InvalidData(format!("get_property {}: {:?}", p.property, e)))?
+                                .ok_or_else(|| GCardError::InvalidData(format!("Property {} not found", p.property)))?;
+                            Ok(ResolvedPredicate { prop_index: prop_id as usize, op: p.op.clone(), value: p.value.clone() })
+                        }).collect::<GCardResult<Vec<_>>>()?
+                    } else {
+                        Vec::new()
+                    };
+
+                    steps.push(CompiledStep::Vertex { label_id, predicates });
+                }
+                PathElement::Edge { label, position, direction } => {
+                    let label_id = graph_type
+                        .get_label_id(label)
+                        .map_err(|e| GCardError::InvalidData(format!("get_label_id {}: {:?}", label, e)))?
+                        .ok_or_else(|| GCardError::InvalidData(format!("Label {} not found", label)))?;
+
+                    let predicates = if let Some(preds) = path_query.edge_predicates.get(position) {
+                        let label_set = minigu_catalog::label_set::LabelSet::from_iter(vec![label_id]);
+                        let edge_type = graph_type
+                            .get_edge_type(&label_set)
+                            .map_err(|e| GCardError::InvalidData(format!("get_edge_type: {:?}", e)))?
+                            .ok_or_else(|| GCardError::InvalidData(format!("Edge type not found for {}", label)))?;
+
+                        preds.iter().map(|p| {
+                            let (prop_id, _) = edge_type.get_property(&p.property)
+                                .map_err(|e| GCardError::InvalidData(format!("get_property {}: {:?}", p.property, e)))?
+                                .ok_or_else(|| GCardError::InvalidData(format!("Property {} not found", p.property)))?;
+                            Ok(ResolvedPredicate { prop_index: prop_id as usize, op: p.op.clone(), value: p.value.clone() })
+                        }).collect::<GCardResult<Vec<_>>>()?
+                    } else {
+                        Vec::new()
+                    };
+
+                    steps.push(CompiledStep::Edge { label_id, direction: direction.clone(), predicates });
+                }
+            }
+        }
+
+        Ok(CompiledPathQuery { steps })
+    }
 }
 
 impl QueryGraph {

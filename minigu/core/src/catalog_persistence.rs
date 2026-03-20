@@ -235,3 +235,8 @@ pub fn catalog_entry_to_graph_type(entry: &GraphCatalogEntry) -> Arc<MemoryGraph
 pub fn graph_data_path(db_path: &Path, graph_name: &str) -> std::path::PathBuf {
     db_path.join(format!("{}.minigu", graph_name))
 }
+
+/// Get the statistic file path for a graph: `<db_path>/<graph_name>.statistic.bin`
+pub fn statistic_path(db_path: &Path, graph_name: &str) -> std::path::PathBuf {
+    db_path.join(format!("{}.statistic.bin", graph_name))
+}

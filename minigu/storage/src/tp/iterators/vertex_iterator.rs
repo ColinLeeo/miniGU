@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use dashmap::iter::Iter;
-use minigu_common::types::VertexId;
+use minigu_common::types::{LabelId, VertexId};
 
 use crate::common::iterators::{ChunkData, VertexIteratorTrait};
 use crate::common::model::vertex::Vertex;
@@ -89,6 +89,27 @@ impl<'a> VertexIteratorTrait<'a> for VertexIterator<'a> {
     }
 }
 
+/// Lightweight iterator that yields `(VertexId, LabelId)` without cloning properties.
+pub struct VertexIdIterator<'a> {
+    inner: Iter<'a, VertexId, VersionedVertex>,
+    txn: &'a MemTransaction,
+}
+
+impl Iterator for VertexIdIterator<'_> {
+    type Item = (VertexId, LabelId);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        for entry in self.inner.by_ref() {
+            let vid = *entry.key();
+            let versioned_vertex = entry.value();
+            if let Some(label_id) = versioned_vertex.get_visible_label_id(self.txn) {
+                return Some((vid, label_id));
+            }
+        }
+        None
+    }
+}
+
 /// Implementation for `MemTransaction`
 impl MemTransaction {
     /// Returns an iterator over all vertices in the graph.
@@ -97,8 +118,17 @@ impl MemTransaction {
         VertexIterator {
             inner: self.graph().vertices().iter(),
             txn: self,
-            filters: Vec::new(), // Initialize with an empty filter list
+            filters: Vec::new(),
             current_vertex: None,
+        }
+    }
+
+    /// Returns a lightweight iterator yielding `(VertexId, LabelId)` for all visible vertices.
+    /// Avoids cloning vertex properties — much faster when only metadata is needed.
+    pub fn iter_vertex_ids(&self) -> VertexIdIterator<'_> {
+        VertexIdIterator {
+            inner: self.graph().vertices().iter(),
+            txn: self,
         }
     }
 }

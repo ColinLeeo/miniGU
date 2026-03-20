@@ -221,7 +221,7 @@ fn infer_properties_from_csv_vertex(
         for (header, value) in prop_headers.iter().zip(prop_values.iter()) {
             let (logical_type_str, nullable) = infer_type_from_value(value);
             properties.push(json!({
-                "name": header,
+                "name": header.to_lowercase(),
                 "logical_type": logical_type_str,
                 "nullable": nullable
             }));
@@ -230,7 +230,7 @@ fn infer_properties_from_csv_vertex(
         // 如果没有数据行，只根据header推断，默认String类型
         for header in prop_headers {
             properties.push(json!({
-                "name": header,
+                "name": header.to_lowercase(),
                 "logical_type": "String",
                 "nullable": true
             }));
@@ -269,7 +269,7 @@ fn infer_properties_from_csv_edge_new(
         for (header, value) in prop_headers.iter().zip(prop_values.iter()) {
             let (logical_type_str, nullable) = infer_type_from_value(value);
             properties.push(json!({
-                "name": header,
+                "name": header.to_lowercase(),
                 "logical_type": logical_type_str,
                 "nullable": nullable
             }));
@@ -278,7 +278,7 @@ fn infer_properties_from_csv_edge_new(
         // 如果没有数据行，只根据header推断，默认String类型
         for header in prop_headers {
             properties.push(json!({
-                "name": header,
+                "name": header.to_lowercase(),
                 "logical_type": "String",
                 "nullable": true
             }));

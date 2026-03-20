@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock, Weak};
 use arrow::array::BooleanArray;
 use crossbeam_skiplist::SkipSet;
 use dashmap::DashMap;
-use minigu_common::types::{EdgeId, VectorIndexKey, VertexId};
+use minigu_common::types::{EdgeId, LabelId, VectorIndexKey, VertexId};
 use minigu_common::value::{ScalarValue, VectorValue};
 use minigu_transaction::{IsolationLevel, Timestamp, Transaction};
 
@@ -167,6 +167,28 @@ impl VersionedVertex {
                 ));
             }
             Ok(visible_vertex)
+        }
+    }
+
+    /// Returns the label_id of the visible vertex without cloning properties.
+    pub(super) fn get_visible_label_id(&self, txn: &MemTransaction) -> Option<LabelId> {
+        let current = self.chain.current.read().unwrap();
+        let commit_ts = current.commit_ts;
+        if (commit_ts.is_txn_id() && commit_ts == txn.txn_id())
+            || (commit_ts.is_commit_ts() && commit_ts <= txn.start_ts())
+        {
+            if current.data.is_tombstone() {
+                None
+            } else {
+                Some(current.data.label_id)
+            }
+        } else {
+            // For undo chain: label_id doesn't change, only need visibility check
+            if self.is_visible(txn) {
+                Some(current.data.label_id)
+            } else {
+                None
+            }
         }
     }
 
@@ -633,6 +655,24 @@ impl MemoryGraph {
     }
 
     // ===== Read-only graph methods =====
+
+    /// Returns the label_id of a vertex without cloning its properties.
+    /// Much cheaper than `get_vertex` when only the label is needed.
+    pub fn get_vertex_label_id(
+        &self,
+        txn: &MemTransaction,
+        vid: VertexId,
+    ) -> StorageResult<LabelId> {
+        let versioned_vertex = self.vertices.get(&vid).ok_or(StorageError::VertexNotFound(
+            VertexNotFoundError::VertexNotFound(vid.to_string()),
+        ))?;
+        versioned_vertex
+            .get_visible_label_id(txn)
+            .ok_or(StorageError::VertexNotFound(
+                VertexNotFoundError::VertexNotFound(vid.to_string()),
+            ))
+    }
+
     /// Retrieves a vertex by its ID within the context of a transaction.
     pub fn get_vertex(&self, txn: &Arc<MemTransaction>, vid: VertexId) -> StorageResult<Vertex> {
         // Step 1: Atomically retrieve the versioned vertex (check existence).

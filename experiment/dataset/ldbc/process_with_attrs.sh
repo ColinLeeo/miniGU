@@ -4,12 +4,17 @@ set -o pipefail
 
 workspace=$(realpath $(dirname $0)/../../)
 basedir=$(dirname $(realpath $0))
-scale_factors=(0.1 0.3 1 3 10 30 100 300 1000)
+scale_factors=(3 10 30 100 300 1000)
 
 duckdb=$workspace/duckdb
 
 function to_lower() {
     echo "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+# 将 CSV 文件的 header 行转为小写
+function lowercase_header() {
+    sed -i '1s/.*/\L&/' "$1"
 }
 vertices=(
     Comment
@@ -59,6 +64,7 @@ function process_vertex() {
                 new_path=$dir/$(to_lower "$type").csv
                 # id 列放在最前面，其他列跟在后面
                 $duckdb -c "copy (select id, * EXCLUDE (id) from '$path' where type = '$type' order by id) to '$new_path' (header, delimiter ',')"
+                lowercase_header "$new_path"
             done
             ;;
         "Place")
@@ -66,12 +72,14 @@ function process_vertex() {
                 new_path=$dir/$(to_lower "$type").csv
                 # id 列放在最前面，其他列跟在后面
                 $duckdb -c "copy (select id, * EXCLUDE (id) from '$path' where type = '$type' order by id) to '$new_path' (header, delimiter ',')"
+                lowercase_header "$new_path"
             done
             ;;
         *)
             new_path=$dir/$(to_lower "$vertex").csv
             # id 列放在最前面，其他列跟在后面
             $duckdb -c "copy (select id, * EXCLUDE (id) from '$path' order by id) to '$new_path' (header, delimiter ',')"
+            lowercase_header "$new_path"
             ;;
         esac
     done
@@ -98,7 +106,9 @@ function process_edge() {
             new_path1=$dir/country_ispartof_continent.csv
             new_path2=$dir/city_ispartof_country.csv
             $duckdb -c "copy ($sql1) to '$new_path1' (header, delimiter ',')"
+            lowercase_header "$new_path1"
             $duckdb -c "copy ($sql2) to '$new_path2' (header, delimiter ',')"
+            lowercase_header "$new_path2"
             ;;
         "Organisation_isLocatedIn_Place")
             organisation="$dir/Organisation/part-*.parquet"
@@ -114,12 +124,15 @@ function process_edge() {
             new_path1=$dir/company_islocatedin_country.csv
             new_path2=$dir/university_islocatedin_city.csv
             $duckdb -c "copy ($sql1) to '$new_path1' (header, delimiter ',')"
+            lowercase_header "$new_path1"
             $duckdb -c "copy ($sql2) to '$new_path2' (header, delimiter ',')"
+            lowercase_header "$new_path2"
             ;;
         *)
             new_path=$dir/$(to_lower "$edge").csv
             # src 和 dst 放在最前面，其他列跟在后面
             $duckdb -c "copy (select $src as src, $dst as dst, * EXCLUDE ($src, $dst) from '$path' order by $src, $dst) to '$new_path' (header, delimiter ',')"
+            lowercase_header "$new_path"
             ;;
         esac
     done
@@ -160,6 +173,7 @@ function process_knows() {
          select dst as src, src as dst, * EXCLUDE (src, dst) from knows"
     $duckdb -c "copy ($sql) to '$tmp_csv_path' (header, delimiter ',')"
     mv $tmp_csv_path $csv_path
+    lowercase_header "$csv_path"
 }
 
 minigu=$workspace/../target/release/minigu

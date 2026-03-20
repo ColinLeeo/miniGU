@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
+use std::path::Path;
 use std::sync::Arc;
 
 use itertools::Itertools;
@@ -243,23 +244,20 @@ fn enumerate_all_paths_walks_in_schema(
 // ----- Graph iteration helpers -----
 
 fn iter_vertices_of_type(
-    graph: &MemoryGraph,
+    _graph: &MemoryGraph,
     node_type: LabelId,
     txn: &Arc<MemTransaction>,
 ) -> StorageResult<Vec<VertexId>> {
-    graph
-        .iter_vertices(txn)?
-        .filter_map(|vertex| match vertex {
-            Ok(vertex) => {
-                if vertex.label_id == node_type {
-                    Some(Ok(vertex.vid))
-                } else {
-                    None
-                }
+    Ok(txn
+        .iter_vertex_ids()
+        .filter_map(|(vid, label_id)| {
+            if label_id == node_type {
+                Some(vid)
+            } else {
+                None
             }
-            Err(e) => Some(Err(e)),
         })
-        .collect()
+        .collect())
 }
 
 /// Vertex-centric: degree map for this vertex type over this edge type.
@@ -272,24 +270,26 @@ fn compute_degree_map_for_vertex_type(
     edge_label_id: LabelId,
     outgoing: bool,
 ) -> Result<DegreeMap, anyhow::Error> {
-    // (A:label_m)-[m:P]->(C:w) where A.id = xxx;
     let vertices = iter_vertices_of_type(graph, vertex_label_id, txn)?;
-    let mut deg: DegreeMap = HashMap::new();
-    for u in vertices {
-        let mut count = 0u64;
-        let mut adj_iter = if outgoing {
-            txn.iter_adjacency_outgoing(u)
-        } else {
-            txn.iter_adjacency_incoming(u)
-        };
-        adj_iter = AdjacencyIteratorTrait::filter(adj_iter, move |n| n.label_id() == edge_label_id);
-        for neighbor_result in adj_iter {
-            if neighbor_result.is_ok() {
-                count += 1;
+    let deg: DegreeMap = vertices
+        .par_iter()
+        .map(|&u| {
+            let mut count = 0u64;
+            let mut adj_iter = if outgoing {
+                txn.iter_adjacency_outgoing(u)
+            } else {
+                txn.iter_adjacency_incoming(u)
+            };
+            adj_iter =
+                AdjacencyIteratorTrait::filter(adj_iter, move |n| n.label_id() == edge_label_id);
+            for neighbor_result in adj_iter {
+                if neighbor_result.is_ok() {
+                    count += 1;
+                }
             }
-        }
-        deg.insert(u, count);
-    }
+            (u, count)
+        })
+        .collect();
     Ok(deg)
 }
 
@@ -305,23 +305,26 @@ fn dp_extend_for_vertex_type(
 ) -> GCardResult<DegreeMap> {
     let vertices = iter_vertices_of_type(graph, vertex_label_id, txn)?;
     let len_of_vertices = vertices.len();
-    let mut out = HashMap::new();
-    for u in vertices {
-        let mut sum = 0u64;
-        let mut adj_iter = if outgoing {
-            txn.iter_adjacency_outgoing(u)
-        } else {
-            txn.iter_adjacency_incoming(u)
-        };
-        adj_iter = AdjacencyIteratorTrait::filter(adj_iter, move |n| n.label_id() == edge_label_id);
-        for neighbor_result in adj_iter {
-            if let Ok(neighbor) = neighbor_result {
-                let vid = neighbor.neighbor_id();
-                sum += suffix_deg.get(&vid).copied().unwrap_or(0);
+    let out: DegreeMap = vertices
+        .par_iter()
+        .map(|&u| {
+            let mut sum = 0u64;
+            let mut adj_iter = if outgoing {
+                txn.iter_adjacency_outgoing(u)
+            } else {
+                txn.iter_adjacency_incoming(u)
+            };
+            adj_iter =
+                AdjacencyIteratorTrait::filter(adj_iter, move |n| n.label_id() == edge_label_id);
+            for neighbor_result in adj_iter {
+                if let Ok(neighbor) = neighbor_result {
+                    let vid = neighbor.neighbor_id();
+                    sum += suffix_deg.get(&vid).copied().unwrap_or(0);
+                }
             }
-        }
-        out.insert(u, sum);
-    }
+            (u, sum)
+        })
+        .collect();
     if out.len() != len_of_vertices {
         println!("len is not same");
     }
@@ -521,29 +524,32 @@ fn build_neighbor_list(
     outgoing: bool,
 ) -> Result<NeighborList, anyhow::Error> {
     let vertices = iter_vertices_of_type(graph, vertex_label_id, txn)?;
-    let mut result: NeighborList = HashMap::with_capacity(vertices.len());
-    for u in vertices {
-        let mut neighbors = Vec::new();
-        let mut adj_iter = if outgoing {
-            txn.iter_adjacency_outgoing(u)
-        } else {
-            txn.iter_adjacency_incoming(u)
-        };
-        adj_iter = AdjacencyIteratorTrait::filter(adj_iter, move |n| n.label_id() == edge_label_id);
-        for neighbor_result in adj_iter {
-            if let Ok(neighbor) = neighbor_result {
-                neighbors.push(neighbor.neighbor_id());
+    let result: NeighborList = vertices
+        .par_iter()
+        .map(|&u| {
+            let mut neighbors = Vec::new();
+            let mut adj_iter = if outgoing {
+                txn.iter_adjacency_outgoing(u)
+            } else {
+                txn.iter_adjacency_incoming(u)
+            };
+            adj_iter =
+                AdjacencyIteratorTrait::filter(adj_iter, move |n| n.label_id() == edge_label_id);
+            for neighbor_result in adj_iter {
+                if let Ok(neighbor) = neighbor_result {
+                    neighbors.push(neighbor.neighbor_id());
+                }
             }
-        }
-        result.insert(u, neighbors);
-    }
+            (u, neighbors)
+        })
+        .collect();
     Ok(result)
 }
 
 /// Compute degree map from a cached neighbor list (just count neighbors).
 fn degree_map_from_neighbor_list(neighbors: &NeighborList) -> DegreeMap {
     neighbors
-        .iter()
+        .par_iter()
         .map(|(&vid, nbrs)| (vid, nbrs.len() as u64))
         .collect()
 }
@@ -555,7 +561,7 @@ fn extend_with_neighbor_cache(
     suffix_deg: &DegreeMap,
 ) -> DegreeMap {
     neighbors
-        .iter()
+        .par_iter()
         .map(|(&vid, nbrs)| {
             let sum: u64 = nbrs
                 .iter()
@@ -849,13 +855,16 @@ pub fn build_procedure() -> Procedure {
         LogicalType::UInt8,
         LogicalType::UInt8,
     ];
-    Procedure::new(parameters, None, move |mut context, args| {
+    Procedure::new(parameters, None, move |context, args| {
+        let catalog_start = std::time::Instant::now();
         let graph_name = args[0]
             .try_as_string()
             .expect("expecting string value for graph_name")
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("expecting string value for graph name"))?
             .to_string();
+
+        let db_path = context.database().config().db_path.clone();
 
         let default_threads = std::thread::available_parallelism()
             .map(|n| n.get())
@@ -866,7 +875,7 @@ pub fn build_procedure() -> Procedure {
             .map(|n| if n == 0 { default_threads } else { n as usize })
             .unwrap_or(default_threads);
 
-        let _pool = ThreadPoolBuilder::new()
+        let pool = ThreadPoolBuilder::new()
             .num_threads(num_threads)
             .build()
             .map_err(|e| anyhow::anyhow!("Failed to create thread pool: {}", e))?;
@@ -910,22 +919,6 @@ pub fn build_procedure() -> Procedure {
         let edges = get_edges_from_catalog(graph_type_ref.as_ref())?;
         let schema_path = enumerate_all_paths_walks_in_schema(&edges, max_k);
 
-        // println!("\n=== Schema Path Patterns ===");
-        // for (len, patterns) in &schema_path {
-        //     println!("\n长度: {}, 数量: {}", len, patterns.len());
-        //     for pattern in patterns {
-        //         let mut parts = Vec::new();
-        //         for i in 0..pattern.es.len() {
-        //             parts.push(pattern.vs[i].clone());
-        //             parts.push(pattern.es[i].clone());
-        //         }
-        //         if let Some(last) = pattern.vs.last() {
-        //             parts.push(last.clone());
-        //         }
-        //         println!("  {}", parts.join("--"));
-        //     }
-        // }
-
         let mode = args
             .get(2)
             .and_then(|a| a.to_u8().ok())
@@ -944,46 +937,49 @@ pub fn build_procedure() -> Procedure {
             .begin_transaction(Serializable)
             .map_err(|e| anyhow::anyhow!("begin_transaction: {}", e))?;
 
-        let cache: PatternDegCache = if mode == 1 {
-            println!("Using neighbor-cached dependency-driven mode");
-            compute_all_degrees_cached(
-                graph.as_ref(),
-                &txn,
-                &edges,
-                &label_name_to_id,
-                &schema_path,
-                max_k,
-            )?
-        } else {
-            println!("Using layer-by-layer mode");
-            let mut cache: PatternDegCache = HashMap::new();
-            for len in 1..=max_k {
-                let patterns = schema_path.get(&len).cloned().unwrap_or_default();
-                if patterns.is_empty() {
-                    continue;
+        // Run all parallel computation inside pool.install() so par_iter uses this pool
+        let cache: PatternDegCache = pool.install(|| -> Result<PatternDegCache, anyhow::Error> {
+            if mode == 1 {
+                println!("Using neighbor-cached dependency-driven mode");
+                compute_all_degrees_cached(
+                    graph.as_ref(),
+                    &txn,
+                    &edges,
+                    &label_name_to_id,
+                    &schema_path,
+                    max_k,
+                )
+            } else {
+                println!("Using layer-by-layer mode");
+                let mut cache: PatternDegCache = HashMap::new();
+                for len in 1..=max_k {
+                    let patterns = schema_path.get(&len).cloned().unwrap_or_default();
+                    if patterns.is_empty() {
+                        continue;
+                    }
+                    if len == 1 {
+                        compute_len1_degrees(
+                            graph.as_ref(),
+                            &txn,
+                            &edges,
+                            &label_name_to_id,
+                            &patterns,
+                            &mut cache,
+                        )?;
+                    } else {
+                        compute_len_ge2_degrees(
+                            graph.as_ref(),
+                            &txn,
+                            &edges,
+                            &label_name_to_id,
+                            &patterns,
+                            &mut cache,
+                        )?;
+                    }
                 }
-                if len == 1 {
-                    compute_len1_degrees(
-                        graph.as_ref(),
-                        &txn,
-                        &edges,
-                        &label_name_to_id,
-                        &patterns,
-                        &mut cache,
-                    )?;
-                } else {
-                    compute_len_ge2_degrees(
-                        graph.as_ref(),
-                        &txn,
-                        &edges,
-                        &label_name_to_id,
-                        &patterns,
-                        &mut cache,
-                    )?;
-                }
+                Ok(cache)
             }
-            cache
-        };
+        })?;
 
         txn.commit()
             .map_err(|e| anyhow::anyhow!("commit transaction: {}", e))?;
@@ -996,9 +992,20 @@ pub fn build_procedure() -> Procedure {
             size as f64 / 1024.0 / 1024.0
         );
 
+        statistic.report_compressed_sizes();
+
         let degree_seq_graph_compressed = statistic
             .to_degree_seq_graph_compressed()
             .map_err(|e| anyhow::anyhow!("to_degree_seq_graph_compressed: {}", e))?;
+        println!(
+            "Catalog build time: {:.3}s",
+            catalog_start.elapsed().as_secs_f64()
+        );
+        // Persist statistic to disk if using on-disk database
+        if let Some(ref db_path) = db_path {
+            save_statistic(db_path, &graph_name, &statistic)?;
+        }
+
         graph_container.set_degree_seq_graph_compressed(Arc::new(degree_seq_graph_compressed));
         graph_container.set_statistic(Arc::new(statistic));
 
@@ -1008,4 +1015,88 @@ pub fn build_procedure() -> Procedure {
 
         Ok(vec![])
     })
+}
+
+/// Procedure: `call load_catalog("<graph_name>")`
+///
+/// Loads a previously saved statistic from `<db_path>/<graph_name>.statistic.bin`,
+/// rebuilds `DegreeSeqGraphCompressed` from it, and sets both on the `GraphContainer`.
+pub fn build_load_procedure() -> Procedure {
+    let parameters = vec![LogicalType::String];
+    Procedure::new(parameters, None, move |context, args| {
+        let graph_name = args[0]
+            .try_as_string()
+            .expect("expecting string value for graph_name")
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("expecting string value for graph name"))?
+            .to_string();
+
+        let db_path = context
+            .database()
+            .config()
+            .db_path
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("no db_path configured (in-memory only database)"))?;
+
+        let schema = context
+            .current_schema
+            .ok_or_else(|| anyhow::anyhow!("current schema not set"))?;
+        let graph_ref = schema
+            .get_graph(&graph_name)?
+            .ok_or_else(|| anyhow::anyhow!("graph named '{}' not found", graph_name))?;
+        let graph_container = graph_ref
+            .downcast_ref::<GraphContainer>()
+            .ok_or_else(|| anyhow::anyhow!("graph '{}' container type mismatch", graph_name))?;
+
+        let stat_path = crate::catalog_persistence::statistic_path(&db_path, &graph_name);
+        let statistic = load_statistic(&stat_path)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no saved statistic found for graph '{}' at {}",
+                    graph_name,
+                    stat_path.display()
+                )
+            })?;
+
+        let degree_seq_graph_compressed = statistic
+            .to_degree_seq_graph_compressed()
+            .map_err(|e| anyhow::anyhow!("to_degree_seq_graph_compressed: {}", e))?;
+
+        graph_container.clear_gcard_data();
+        graph_container.set_degree_seq_graph_compressed(Arc::new(degree_seq_graph_compressed));
+        graph_container.set_statistic(Arc::new(statistic));
+
+        println!("Catalog loaded for graph '{}'", graph_name);
+        Ok(vec![])
+    })
+}
+
+// ---- Statistic bincode persistence ----
+
+fn save_statistic(db_path: &Path, graph_name: &str, statistic: &Statistic) -> Result<(), anyhow::Error> {
+    let path = crate::catalog_persistence::statistic_path(db_path, graph_name);
+    let bytes = bincode::serialize(statistic)
+        .map_err(|e| anyhow::anyhow!("failed to serialize statistic: {}", e))?;
+    std::fs::write(&path, &bytes)?;
+    println!(
+        "Statistic saved to {} ({:.2} MB)",
+        path.display(),
+        bytes.len() as f64 / 1024.0 / 1024.0
+    );
+    Ok(())
+}
+
+fn load_statistic(path: &Path) -> Result<Option<Statistic>, anyhow::Error> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(path)?;
+    let statistic: Statistic = bincode::deserialize(&bytes)
+        .map_err(|e| anyhow::anyhow!("failed to deserialize statistic: {}", e))?;
+    println!(
+        "Statistic loaded from {} ({:.2} MB)",
+        path.display(),
+        bytes.len() as f64 / 1024.0 / 1024.0
+    );
+    Ok(Some(statistic))
 }
