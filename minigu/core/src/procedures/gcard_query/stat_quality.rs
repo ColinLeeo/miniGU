@@ -17,8 +17,8 @@ use minigu_context::graph::GraphContainer;
 use minigu_context::procedure::Procedure;
 use minigu_execution::error::ExecutionError;
 
-use crate::procedures::gcard_query::catalog::AltKey;
 use crate::procedures::gcard_query::Statistic;
+use crate::procedures::gcard_query::catalog::AltKey;
 
 /// Build the `GCard_stat_quality` procedure.
 ///

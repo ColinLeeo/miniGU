@@ -191,6 +191,7 @@ impl GraphContainer {
 
         Ok(true)
     }
+
     /// GCard: set degree_seq_graph_compressed (persists with graph, not session).
     pub fn set_degree_seq_graph_compressed(&self, v: Arc<dyn Any + Send + Sync>) {
         *self
@@ -233,7 +234,10 @@ impl GraphContainer {
     /// Called at the start of `GCard_build` to ensure a clean slate before rebuilding,
     /// discarding any stale log entries that belong to the previous statistic schema.
     pub fn clear_gcard_data(&self) {
-        *self.degree_seq_graph_compressed.write().expect("RwLock write") = None;
+        *self
+            .degree_seq_graph_compressed
+            .write()
+            .expect("RwLock write") = None;
         *self.statistic.write().expect("RwLock write") = None;
         *self.gcard_update_log.write().expect("RwLock write") = None;
     }

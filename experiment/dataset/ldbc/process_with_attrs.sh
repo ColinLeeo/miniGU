@@ -4,7 +4,7 @@ set -o pipefail
 
 workspace=$(realpath $(dirname $0)/../../)
 basedir=$(dirname $(realpath $0))
-scale_factors=(3 10 30 100 300 1000)
+scale_factors=(0.1 0.3 1 3 10 30 100 300 1000)
 
 duckdb=$workspace/duckdb
 
@@ -14,7 +14,8 @@ function to_lower() {
 
 # 将 CSV 文件的 header 行转为小写
 function lowercase_header() {
-    sed -i '1s/.*/\L&/' "$1"
+    { head -1 "$1" | tr '[:upper:]' '[:lower:]'; tail -n +2 "$1"; } > "$1.tmp"
+    mv "$1.tmp" "$1"
 }
 vertices=(
     Comment
@@ -204,16 +205,43 @@ EOGQL
     echo "done sf$1"
 }
 
+function has_parquet() {
+    local dir=$basedir/sf$1
+    for vertex in ${vertices[@]}; do
+        [ -d "$dir/$vertex" ] && return 0
+    done
+    return 1
+}
+
+function has_csv() {
+    local dir=$basedir/sf$1
+    ls "$dir"/*.csv &>/dev/null
+}
+
 for sf in ${scale_factors[@]}; do
-    if ! [ -d $basedir/sf$sf ] || [ -s "$(find $basedir/sf$sf -name *.parquet -type f)" ]; then
-        continue
+    dir=$basedir/sf$sf
+    [ -d "$dir" ] || continue
+
+    # Step 1: convert parquet -> csv (skip if parquet dirs already removed)
+    if has_parquet $sf; then
+        echo "=== sf$sf: processing parquet -> csv ==="
+        process_vertex $sf
+        process_edge $sf
+        delete_vertex $sf
+        delete_edge $sf
     fi
-    process_vertex $sf
-    process_edge $sf
-    delete_vertex $sf
-    delete_edge $sf
-    # unique_vid $sf
-    process_knows $sf
-    load_to_minigu $sf
+
+    # Step 2: process knows (skip if no csv yet)
+    if has_csv $sf; then
+        echo "=== sf$sf: processing knows ==="
+        # unique_vid $sf
+        process_knows $sf
+    fi
+
+    # Step 3: load to minigu (already has its own skip logic)
+    if has_csv $sf; then
+        echo "=== sf$sf: loading to minigu ==="
+        load_to_minigu $sf
+    fi
 done
 

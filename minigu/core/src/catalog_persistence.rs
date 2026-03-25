@@ -133,18 +133,14 @@ fn graph_type_to_catalog_entry(graph_type: &MemoryGraphTypeCatalog) -> GraphCata
                 .clone();
 
             let src_label_set = et.src().label_set();
-            let src_label_id = src_label_set
-                .first()
-                .expect("src should have a label");
+            let src_label_id = src_label_set.first().expect("src should have a label");
             let src_label = id_to_name
                 .get(&src_label_id)
                 .expect("src label name should exist")
                 .clone();
 
             let dst_label_set = et.dst().label_set();
-            let dst_label_id = dst_label_set
-                .first()
-                .expect("dst should have a label");
+            let dst_label_id = dst_label_set.first().expect("dst should have a label");
             let dst_label = id_to_name
                 .get(&dst_label_id)
                 .expect("dst label name should exist")

@@ -13,16 +13,16 @@ use minigu_context::procedure::Procedure;
 use minigu_storage::error::StorageResult;
 use minigu_storage::iterators::AdjacencyIteratorTrait;
 use minigu_storage::tp::{MemTransaction, MemoryGraph};
-use minigu_transaction::{GraphTxnManager, Transaction};
 use minigu_transaction::IsolationLevel::Serializable;
-use rayon::prelude::*;
+use minigu_transaction::{GraphTxnManager, Transaction};
 use rayon::ThreadPoolBuilder;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::catalog::AltKey;
-use super::{make_alt_key, Statistic};
+use super::{Statistic, make_alt_key};
 use crate::procedures::gcard_query::error::GCardResult;
-
+use crate::procedures::gcard_query::statistic::save_statistic;
 // ----- Schema edge info (string-based, same shape as create_catalog) -----
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -158,11 +158,14 @@ pub fn get_edges_from_catalog(
             .get(&dst_id)
             .cloned()
             .unwrap_or_else(|| format!("Unknown_{}", dst_id));
-        edges.insert(edge_name.clone(), SchemaEdgeInfo {
-            edge_name,
-            src_label,
-            dst_label,
-        });
+        edges.insert(
+            edge_name.clone(),
+            SchemaEdgeInfo {
+                edge_name,
+                src_label,
+                dst_label,
+            },
+        );
     }
     Ok(edges)
 }
@@ -197,6 +200,8 @@ fn build_undirected_adj(
     adj
 }
 
+// 这个函数会在schema 上遍历，得到所有小于 max_len 的path。
+// 这里会区分正反向。
 fn enumerate_all_paths_walks_in_schema(
     edges: &HashMap<String, SchemaEdgeInfo>,
     max_len: usize,
@@ -243,6 +248,7 @@ fn enumerate_all_paths_walks_in_schema(
 
 // ----- Graph iteration helpers -----
 
+// 这里是筛选某个labelid 的点到一个集合里。
 fn iter_vertices_of_type(
     _graph: &MemoryGraph,
     node_type: LabelId,
@@ -260,9 +266,7 @@ fn iter_vertices_of_type(
         .collect())
 }
 
-/// Vertex-centric: degree map for this vertex type over this edge type.
-/// edge_id + outgoing only; in your system edge uniquely fixes both endpoints, so no need to
-/// resolve or filter by neighbor label.
+// 给定一个vertex id，得到对应的度数序列 id + neighbour_count
 fn compute_degree_map_for_vertex_type(
     graph: &MemoryGraph,
     txn: &Arc<MemTransaction>,
@@ -293,8 +297,7 @@ fn compute_degree_map_for_vertex_type(
     Ok(deg)
 }
 
-/// Vertex-centric: extended degree map over this edge (sum suffix_deg over neighbors, on-the-fly).
-/// edge_id + outgoing only; edge uniquely fixes both endpoints, so no neighbor label check.
+// 这里传入一个vertexid, labelid, 就可以计算累加 count. 计算 k = 2 有效。
 fn dp_extend_for_vertex_type(
     graph: &MemoryGraph,
     txn: &Arc<MemTransaction>,
@@ -556,10 +559,7 @@ fn degree_map_from_neighbor_list(neighbors: &NeighborList) -> DegreeMap {
 
 /// Extend degree map using cached neighbor list + suffix degree map.
 /// For each vertex u, sum suffix_deg[neighbor] over all cached neighbors.
-fn extend_with_neighbor_cache(
-    neighbors: &NeighborList,
-    suffix_deg: &DegreeMap,
-) -> DegreeMap {
+fn extend_with_neighbor_cache(neighbors: &NeighborList, suffix_deg: &DegreeMap) -> DegreeMap {
     neighbors
         .par_iter()
         .map(|(&vid, nbrs)| {
@@ -572,6 +572,87 @@ fn extend_with_neighbor_cache(
         .collect()
 }
 
+// ----- Vec-based compute (local ID remapping for cache-friendly access) -----
+
+/// Pre-converted neighbor list with dense local IDs for cache-friendly access.
+/// Built once per HopKey, reused by all patterns that depend on this hop.
+struct VecNeighborData {
+    /// Ordered source vertex IDs (index = local source ID)
+    src_verts: Vec<VertexId>,
+    /// Ordered destination vertex IDs (index = local dest ID)
+    dst_verts: Vec<VertexId>,
+    /// global→local mapping for destination vertices
+    dst_to_local: HashMap<VertexId, u32>,
+    /// neighbors_vec[local_src] = sorted list of local_dst IDs
+    neighbors_vec: Vec<Vec<u32>>,
+}
+
+/// Convert a NeighborList to VecNeighborData (done once per hop after scan).
+fn convert_to_vec_neighbor_data(neighbors: &NeighborList) -> VecNeighborData {
+    let src_verts: Vec<VertexId> = neighbors.keys().copied().collect();
+
+    // Collect all unique destination vertex IDs
+    let mut dst_set: HashSet<VertexId> = HashSet::new();
+    for nbrs in neighbors.values() {
+        for &n in nbrs {
+            dst_set.insert(n);
+        }
+    }
+    let dst_verts: Vec<VertexId> = dst_set.into_iter().collect();
+    let dst_to_local: HashMap<VertexId, u32> = dst_verts
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| (v, i as u32))
+        .collect();
+
+    // Convert neighbor lists to local dst IDs
+    let neighbors_vec: Vec<Vec<u32>> = src_verts
+        .iter()
+        .map(|v| neighbors[v].iter().map(|n| dst_to_local[n]).collect())
+        .collect();
+
+    VecNeighborData {
+        src_verts,
+        dst_verts,
+        dst_to_local,
+        neighbors_vec,
+    }
+}
+
+/// Vec-based degree count: just count neighbors per source vertex.
+fn degree_map_from_vec_data(data: &VecNeighborData) -> DegreeMap {
+    let counts: Vec<u64> = data
+        .neighbors_vec
+        .par_iter()
+        .map(|nbrs| nbrs.len() as u64)
+        .collect();
+    data.src_verts.iter().copied().zip(counts).collect()
+}
+
+/// Vec-based extend: build a dense suffix_deg Vec once from DegreeMap,
+/// then do pure array lookups in parallel.
+fn extend_with_vec_data(data: &VecNeighborData, suffix_deg: &DegreeMap) -> DegreeMap {
+    // Build dense suffix_deg Vec indexed by local dst ID (one-time, cheap)
+    let suffix_vec: Vec<u64> = data
+        .dst_verts
+        .iter()
+        .map(|v| suffix_deg.get(v).copied().unwrap_or(0))
+        .collect();
+
+    // Parallel compute using pure array indexing — this is the hot loop
+    let results: Vec<u64> = data
+        .neighbors_vec
+        .par_iter()
+        .map(|nbrs| {
+            nbrs.iter()
+                .map(|&local_id| suffix_vec[local_id as usize])
+                .sum()
+        })
+        .collect();
+
+    data.src_verts.iter().copied().zip(results).collect()
+}
+
 /// Lazy, dependency-driven computation with neighbor caching.
 ///
 /// Instead of building ALL neighbor caches upfront, this function builds them
@@ -580,6 +661,7 @@ fn extend_with_neighbor_cache(
 /// computing a len-1 pattern may unlock len-2 patterns whose HopKeys are already
 /// cached.  Neighbor caches are evicted as soon as all their consumers are done,
 /// keeping peak memory low.
+/// 依据依赖关系计算度数
 fn compute_all_degrees_cached(
     graph: &MemoryGraph,
     txn: &Arc<MemTransaction>,
@@ -654,10 +736,8 @@ fn compute_all_degrees_cached(
                 pattern.vs.iter().cloned().rev().collect(),
                 pattern.es.iter().cloned().rev().collect(),
             );
-            let right_suffix = PathPattern::new_without_reverse(
-                rp.vs[1..].to_vec(),
-                rp.es[1..].to_vec(),
-            );
+            let right_suffix =
+                PathPattern::new_without_reverse(rp.vs[1..].to_vec(), rp.es[1..].to_vec());
             suffix_keys.insert(right_suffix.sort());
         }
 
@@ -672,6 +752,7 @@ fn compute_all_degrees_cached(
 
     // Step 4: Lazy build loop — build one HopKey at a time, then cascade.
     let mut neighbor_caches: HashMap<HopKey, NeighborList> = HashMap::new();
+    let mut vec_caches: HashMap<HopKey, VecNeighborData> = HashMap::new();
     let mut cache: PatternDegCache = HashMap::new();
     let mut computed_patterns: HashSet<PathPattern> = HashSet::new();
     let mut pending_consumers = hop_consumer_count.clone();
@@ -685,8 +766,10 @@ fn compute_all_degrees_cached(
             .get(&hop.edge_label)
             .ok_or_else(|| anyhow::anyhow!("edge label not found: {}", hop.edge_label))?;
         let nl = build_neighbor_list(graph, txn, vertex_label_id, edge_label_id, hop.outgoing)?;
-        println!("Built neighbor cache {:?} ({} vertices)", hop, nl.len());
+        let vec_data = convert_to_vec_neighbor_data(&nl);
+
         neighbor_caches.insert(hop.clone(), nl);
+        vec_caches.insert(hop.clone(), vec_data);
 
         // Cascade: compute all patterns whose dependencies are now fully satisfied.
         // This loop handles transitivity: computing len-1 patterns may unlock len-2, etc.
@@ -710,8 +793,8 @@ fn compute_all_degrees_cached(
                 break;
             }
 
-            // Compute ready patterns in parallel.
             let cache_ref: &PatternDegCache = &cache;
+            let vec_caches_ref: &HashMap<HopKey, VecNeighborData> = &vec_caches;
             let results: Vec<
                 Result<(PathPattern, String, DegreeMap, String, DegreeMap), anyhow::Error>,
             > = ready
@@ -723,11 +806,10 @@ fn compute_all_degrees_cached(
                     let left_node = v_seq[0].clone();
                     let right_node = v_seq.last().unwrap().clone();
 
-                    // Left degree
                     let left_hop = &pattern_left_hop[pattern];
-                    let left_neighbors = neighbor_caches.get(left_hop).unwrap();
+                    let left_vec_data = vec_caches_ref.get(left_hop).unwrap();
                     let left_deg = if len == 1 {
-                        degree_map_from_neighbor_list(left_neighbors)
+                        degree_map_from_vec_data(left_vec_data)
                     } else {
                         let suffix = PathPattern::new_without_reverse(
                             v_seq[1..].to_vec(),
@@ -744,14 +826,14 @@ fn compute_all_degrees_cached(
                                     suffix
                                 )
                             })?;
-                        extend_with_neighbor_cache(left_neighbors, suffix_deg)
+                        extend_with_vec_data(left_vec_data, suffix_deg)
                     };
 
-                    // Right degree
+                    // Right degree — using pre-built VecNeighborData
                     let right_hop = &pattern_right_hop[pattern];
-                    let right_neighbors = neighbor_caches.get(right_hop).unwrap();
+                    let right_vec_data = vec_caches_ref.get(right_hop).unwrap();
                     let right_deg = if len == 1 {
-                        degree_map_from_neighbor_list(right_neighbors)
+                        degree_map_from_vec_data(right_vec_data)
                     } else {
                         let rp = PathPattern::new_without_reverse(
                             v_seq.iter().cloned().rev().collect(),
@@ -772,7 +854,7 @@ fn compute_all_degrees_cached(
                                     rp
                                 )
                             })?;
-                        extend_with_neighbor_cache(right_neighbors, rsuffix_deg)
+                        extend_with_vec_data(right_vec_data, rsuffix_deg)
                     };
 
                     Ok((pattern.clone(), left_node, left_deg, right_node, right_deg))
@@ -818,6 +900,7 @@ fn compute_all_degrees_cached(
                         mem_bytes as f64 / 1024.0 / 1024.0,
                     );
                 }
+                vec_caches.remove(key);
                 pending_consumers.remove(key);
             }
         }
@@ -856,7 +939,6 @@ pub fn build_procedure() -> Procedure {
         LogicalType::UInt8,
     ];
     Procedure::new(parameters, None, move |context, args| {
-        let catalog_start = std::time::Instant::now();
         let graph_name = args[0]
             .try_as_string()
             .expect("expecting string value for graph_name")
@@ -912,17 +994,12 @@ pub fn build_procedure() -> Procedure {
             .ok_or_else(|| anyhow::anyhow!("expecting int8 for path length"))?;
         let max_k = path_len as usize;
 
-        // Clear any stale GCard data before rebuilding from scratch.
-        // Old log entries reference the previous statistic schema and must be discarded.
         graph_container.clear_gcard_data();
 
         let edges = get_edges_from_catalog(graph_type_ref.as_ref())?;
         let schema_path = enumerate_all_paths_walks_in_schema(&edges, max_k);
 
-        let mode = args
-            .get(2)
-            .and_then(|a| a.to_u8().ok())
-            .unwrap_or(0);
+        let mode = args.get(2).and_then(|a| a.to_u8().ok()).unwrap_or(0);
 
         let mut label_name_to_id: HashMap<String, LabelId> = HashMap::new();
         for name in graph_type_ref.label_names() {
@@ -937,49 +1014,61 @@ pub fn build_procedure() -> Procedure {
             .begin_transaction(Serializable)
             .map_err(|e| anyhow::anyhow!("begin_transaction: {}", e))?;
 
-        // Run all parallel computation inside pool.install() so par_iter uses this pool
-        let cache: PatternDegCache = pool.install(|| -> Result<PatternDegCache, anyhow::Error> {
-            if mode == 1 {
-                println!("Using neighbor-cached dependency-driven mode");
-                compute_all_degrees_cached(
-                    graph.as_ref(),
-                    &txn,
-                    &edges,
-                    &label_name_to_id,
-                    &schema_path,
-                    max_k,
-                )
-            } else {
-                println!("Using layer-by-layer mode");
-                let mut cache: PatternDegCache = HashMap::new();
-                for len in 1..=max_k {
-                    let patterns = schema_path.get(&len).cloned().unwrap_or_default();
-                    if patterns.is_empty() {
-                        continue;
+        #[cfg(feature = "profiling")]
+        let _pprof_guard = pprof::ProfilerGuardBuilder::default()
+            .frequency(1000)
+            .build()
+            .expect("pprof guard build failed");
+
+        let cache: PatternDegCache =
+            pool.install(|| -> Result<PatternDegCache, anyhow::Error> {
+                if mode == 1 {
+                    compute_all_degrees_cached(
+                        graph.as_ref(),
+                        &txn,
+                        &edges,
+                        &label_name_to_id,
+                        &schema_path,
+                        max_k,
+                    )
+                } else {
+                    let mut cache: PatternDegCache = HashMap::new();
+                    for len in 1..=max_k {
+                        let patterns = schema_path.get(&len).cloned().unwrap_or_default();
+                        if patterns.is_empty() {
+                            continue;
+                        }
+                        if len == 1 {
+                            compute_len1_degrees(
+                                graph.as_ref(),
+                                &txn,
+                                &edges,
+                                &label_name_to_id,
+                                &patterns,
+                                &mut cache,
+                            )?;
+                        } else {
+                            compute_len_ge2_degrees(
+                                graph.as_ref(),
+                                &txn,
+                                &edges,
+                                &label_name_to_id,
+                                &patterns,
+                                &mut cache,
+                            )?;
+                        }
                     }
-                    if len == 1 {
-                        compute_len1_degrees(
-                            graph.as_ref(),
-                            &txn,
-                            &edges,
-                            &label_name_to_id,
-                            &patterns,
-                            &mut cache,
-                        )?;
-                    } else {
-                        compute_len_ge2_degrees(
-                            graph.as_ref(),
-                            &txn,
-                            &edges,
-                            &label_name_to_id,
-                            &patterns,
-                            &mut cache,
-                        )?;
-                    }
+                    Ok(cache)
                 }
-                Ok(cache)
-            }
-        })?;
+            })?;
+
+        #[cfg(feature = "profiling")]
+        if let Ok(report) = _pprof_guard.report().build() {
+            let file = std::fs::File::create("/tmp/gcard_flamegraph.svg")
+                .expect("create flamegraph file failed");
+            report.flamegraph(file).expect("write flamegraph failed");
+            println!("Flamegraph written to /tmp/gcard_flamegraph.svg");
+        }
 
         txn.commit()
             .map_err(|e| anyhow::anyhow!("commit transaction: {}", e))?;
@@ -997,10 +1086,6 @@ pub fn build_procedure() -> Procedure {
         let degree_seq_graph_compressed = statistic
             .to_degree_seq_graph_compressed()
             .map_err(|e| anyhow::anyhow!("to_degree_seq_graph_compressed: {}", e))?;
-        println!(
-            "Catalog build time: {:.3}s",
-            catalog_start.elapsed().as_secs_f64()
-        );
         // Persist statistic to disk if using on-disk database
         if let Some(ref db_path) = db_path {
             save_statistic(db_path, &graph_name, &statistic)?;
@@ -1015,88 +1100,4 @@ pub fn build_procedure() -> Procedure {
 
         Ok(vec![])
     })
-}
-
-/// Procedure: `call load_catalog("<graph_name>")`
-///
-/// Loads a previously saved statistic from `<db_path>/<graph_name>.statistic.bin`,
-/// rebuilds `DegreeSeqGraphCompressed` from it, and sets both on the `GraphContainer`.
-pub fn build_load_procedure() -> Procedure {
-    let parameters = vec![LogicalType::String];
-    Procedure::new(parameters, None, move |context, args| {
-        let graph_name = args[0]
-            .try_as_string()
-            .expect("expecting string value for graph_name")
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("expecting string value for graph name"))?
-            .to_string();
-
-        let db_path = context
-            .database()
-            .config()
-            .db_path
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("no db_path configured (in-memory only database)"))?;
-
-        let schema = context
-            .current_schema
-            .ok_or_else(|| anyhow::anyhow!("current schema not set"))?;
-        let graph_ref = schema
-            .get_graph(&graph_name)?
-            .ok_or_else(|| anyhow::anyhow!("graph named '{}' not found", graph_name))?;
-        let graph_container = graph_ref
-            .downcast_ref::<GraphContainer>()
-            .ok_or_else(|| anyhow::anyhow!("graph '{}' container type mismatch", graph_name))?;
-
-        let stat_path = crate::catalog_persistence::statistic_path(&db_path, &graph_name);
-        let statistic = load_statistic(&stat_path)?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no saved statistic found for graph '{}' at {}",
-                    graph_name,
-                    stat_path.display()
-                )
-            })?;
-
-        let degree_seq_graph_compressed = statistic
-            .to_degree_seq_graph_compressed()
-            .map_err(|e| anyhow::anyhow!("to_degree_seq_graph_compressed: {}", e))?;
-
-        graph_container.clear_gcard_data();
-        graph_container.set_degree_seq_graph_compressed(Arc::new(degree_seq_graph_compressed));
-        graph_container.set_statistic(Arc::new(statistic));
-
-        println!("Catalog loaded for graph '{}'", graph_name);
-        Ok(vec![])
-    })
-}
-
-// ---- Statistic bincode persistence ----
-
-fn save_statistic(db_path: &Path, graph_name: &str, statistic: &Statistic) -> Result<(), anyhow::Error> {
-    let path = crate::catalog_persistence::statistic_path(db_path, graph_name);
-    let bytes = bincode::serialize(statistic)
-        .map_err(|e| anyhow::anyhow!("failed to serialize statistic: {}", e))?;
-    std::fs::write(&path, &bytes)?;
-    println!(
-        "Statistic saved to {} ({:.2} MB)",
-        path.display(),
-        bytes.len() as f64 / 1024.0 / 1024.0
-    );
-    Ok(())
-}
-
-fn load_statistic(path: &Path) -> Result<Option<Statistic>, anyhow::Error> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let bytes = std::fs::read(path)?;
-    let statistic: Statistic = bincode::deserialize(&bytes)
-        .map_err(|e| anyhow::anyhow!("failed to deserialize statistic: {}", e))?;
-    println!(
-        "Statistic loaded from {} ({:.2} MB)",
-        path.display(),
-        bytes.len() as f64 / 1024.0 / 1024.0
-    );
-    Ok(Some(statistic))
 }

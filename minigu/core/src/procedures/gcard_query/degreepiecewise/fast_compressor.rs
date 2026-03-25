@@ -4,7 +4,8 @@ pub struct FastCompressor {
     threads: usize,
 }
 
-/// Build bucket bounds for base and max value; used when encoding a block to get bucket index per frac.
+/// Build bucket bounds for base and max value; used when encoding a block to get bucket index per
+/// frac.
 pub fn build_bounds(base: u64, max_value: u64) -> Vec<u64> {
     let mut bounds = Vec::new();
     let mut x = 1;
@@ -49,7 +50,7 @@ impl FastCompressor {
         } else {
             let v = max as f64;
             let base_f = base as f64;
-            let len =  (v.ln() / base_f.ln()).ceil() as usize + 1;
+            let len = (v.ln() / base_f.ln()).ceil() as usize + 1;
             len.max(1)
         };
         let bounds = build_bounds(self.base, max);

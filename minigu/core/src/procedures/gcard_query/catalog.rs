@@ -27,11 +27,7 @@ impl AltKey {
     }
 
     fn normalized(&self) -> Vec<String> {
-        let mut v: Vec<String> = self
-            .0
-            .iter()
-            .map(|s| s.to_lowercase())
-            .collect();
+        let mut v: Vec<String> = self.0.iter().map(|s| s.to_lowercase()).collect();
         v.sort();
         v
     }

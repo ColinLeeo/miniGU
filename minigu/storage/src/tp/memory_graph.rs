@@ -819,8 +819,7 @@ impl MemoryGraph {
     /// Only use for bulk import where crash recovery is not needed (reimport on failure).
     pub fn bulk_insert_vertex(&self, vertex: Vertex) {
         let vid = vertex.vid();
-        self.vertices
-            .insert(vid, VersionedVertex::new(vertex));
+        self.vertices.insert(vid, VersionedVertex::new(vertex));
     }
 
     /// Inserts an edge directly into the graph without transaction overhead.
@@ -833,8 +832,7 @@ impl MemoryGraph {
         let dst_id = edge.dst_id();
         let label_id = edge.label_id();
 
-        self.edges
-            .insert(eid, VersionedEdge::new(edge));
+        self.edges.insert(eid, VersionedEdge::new(edge));
 
         self.adjacency_list
             .entry(src_id)

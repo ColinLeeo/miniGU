@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use minigu_common::types::{EdgeId, VertexId};
 
-use crate::procedures::gcard_query::degreepiecewise::{alpha, alpha_refs, beta_right, Pcf};
+use crate::procedures::gcard_query::degreepiecewise::{Pcf, alpha, alpha_refs, beta_right};
 use crate::procedures::gcard_query::error::{GCardError, GCardResult};
 use crate::procedures::gcard_query::graph::{Endpoints, GraphSkeleton};
 use crate::procedures::gcard_query::types::{AbstractEdge, QueryVertex};
@@ -185,7 +185,7 @@ impl GraphSkeleton<AbstractEdge> {
                     Pcf::empty()
                 };
 
-                let  result = if !children.is_empty() {
+                let result = if !children.is_empty() {
                     let child_pcfs: Vec<Pcf> = children
                         .iter()
                         .filter_map(|(child_id, _)| child_vertex_pcf.get(child_id).cloned())

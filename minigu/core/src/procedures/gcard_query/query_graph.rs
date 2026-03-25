@@ -1,6 +1,7 @@
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::Arc;
 
+use dashmap::DashMap;
 use minigu_catalog::provider::{GraphTypeProvider, PropertiesProvider};
 use minigu_common::types::{EdgeId, LabelId, VertexId};
 use minigu_common::value::ScalarValue;
@@ -8,14 +9,16 @@ use minigu_context::graph::GraphContainer;
 use minigu_storage::common::iterators::AdjacencyIteratorTrait;
 use minigu_storage::common::model::edge::Edge;
 use minigu_storage::common::model::vertex::Vertex;
-use minigu_storage::tp::transaction::{IsolationLevel, MemTransaction};
 use minigu_storage::tp::MemoryGraph;
+use minigu_storage::tp::transaction::{IsolationLevel, MemTransaction};
 use minigu_transaction::Transaction;
 use minigu_transaction::manager::GraphTxnManager;
 use rayon::prelude::*;
 
+use crate::procedures::gcard_query::PredicateApplyType;
+use crate::procedures::gcard_query::PredicateApplyType::INNER;
 use crate::procedures::gcard_query::abs_graph::AbstractGraph;
-use crate::procedures::gcard_query::catalog::{make_alt_key, DegreeSeqGraphCompressed};
+use crate::procedures::gcard_query::catalog::{DegreeSeqGraphCompressed, make_alt_key};
 use crate::procedures::gcard_query::degreepiecewise::Pcf;
 use crate::procedures::gcard_query::error::{GCardError, GCardResult};
 use crate::procedures::gcard_query::graph::{Endpoints, GraphSkeleton};
@@ -23,8 +26,6 @@ use crate::procedures::gcard_query::types::{
     AbstractEdge, CandidateTree, ComparisonOp, PredicateDef, PredicateId, PredicateLocation,
 };
 use crate::procedures::gcard_query::union_find::UnionFind;
-use crate::procedures::gcard_query::PredicateApplyType;
-use crate::procedures::gcard_query::PredicateApplyType::INNER;
 
 #[derive(Debug, Clone)]
 pub struct QueryEdge {
@@ -443,6 +444,11 @@ impl QueryGraph {
         sample_size: usize,
         predicate_apply_type: &PredicateApplyType,
     ) -> GCardResult<Vec<(AbstractGraph, u32)>> {
+        // Cache selectivity by (path_pattern, predicates) to avoid redundant sampling
+        let selectivity_cache: Arc<DashMap<String, f64>> = Arc::new(DashMap::new());
+        // Cache sampled vertex IDs by label to avoid repeated full-table scans
+        let vertex_sample_cache: Arc<DashMap<LabelId, Vec<VertexId>>> = Arc::new(DashMap::new());
+
         if !self.has_cycle() {
             let abstract_graph = self.build_abstract_graph_from_query_graph(
                 self,
@@ -451,6 +457,8 @@ impl QueryGraph {
                 graph_container,
                 sample_size,
                 predicate_apply_type,
+                &selectivity_cache,
+                &vertex_sample_cache,
             )?;
             return Ok(vec![(abstract_graph, 0)]);
         }
@@ -470,6 +478,8 @@ impl QueryGraph {
                     graph_container,
                     sample_size,
                     predicate_apply_type,
+                    &selectivity_cache,
+                    &vertex_sample_cache,
                 )
                 .map(|ag| (ag, *tree_score))
             })
@@ -504,6 +514,8 @@ impl QueryGraph {
         graph_container: Option<&GraphContainer>,
         sample_size: usize,
         predicate_apply_type: &PredicateApplyType,
+        selectivity_cache: &Arc<DashMap<String, f64>>,
+        vertex_sample_cache: &Arc<DashMap<LabelId, Vec<VertexId>>>,
     ) -> GCardResult<AbstractGraph> {
         let pivot_nodes = query_graph.find_pivot_nodes();
 
@@ -521,6 +533,8 @@ impl QueryGraph {
                     graph_container,
                     sample_size,
                     predicate_apply_type,
+                    selectivity_cache,
+                    vertex_sample_cache,
                 )?;
 
                 let src_vertex = self.get_vertex(abstract_edge.src).unwrap();
@@ -546,6 +560,8 @@ impl QueryGraph {
         graph_container: Option<&GraphContainer>,
         sample_size: usize,
         predicate_apply_type: &PredicateApplyType,
+        selectivity_cache: &Arc<DashMap<String, f64>>,
+        vertex_sample_cache: &Arc<DashMap<LabelId, Vec<VertexId>>>,
     ) -> GCardResult<()> {
         let mut node_labels = Vec::new();
         for &vertex_id in &abstract_edge.path_vertices {
@@ -611,7 +627,21 @@ impl QueryGraph {
                 && (matches!(predicate_apply_type, PredicateApplyType::INNER)
                     || matches!(predicate_apply_type, PredicateApplyType::OUTER))
             {
-                self.compute_selectivity_with_predicates(graph, abstract_edge, sample_size)?
+                // Build cache key from path pattern + predicates
+                let cache_key =
+                    Self::build_selectivity_cache_key(&alt_key, &abstract_edge.predicates);
+                if let Some(cached) = selectivity_cache.get(&cache_key) {
+                    *cached
+                } else {
+                    let sel = self.compute_selectivity_with_predicates(
+                        graph,
+                        abstract_edge,
+                        sample_size,
+                        vertex_sample_cache,
+                    )?;
+                    selectivity_cache.insert(cache_key, sel);
+                    sel
+                }
             } else {
                 1.0f64
             };
@@ -633,11 +663,37 @@ impl QueryGraph {
         Ok(())
     }
 
+    fn build_selectivity_cache_key(
+        alt_key: &crate::procedures::gcard_query::catalog::AltKey,
+        predicates: &[PredicateDef],
+    ) -> String {
+        use std::fmt::Write;
+        let mut key = format!("path:{}", alt_key);
+        // Sort predicates by (target, id, property, op) for a deterministic key
+        let mut sorted_preds: Vec<_> = predicates.iter().collect();
+        sorted_preds.sort_by(|a, b| {
+            a.target
+                .cmp(&b.target)
+                .then(a.id.cmp(&b.id))
+                .then(a.property.cmp(&b.property))
+                .then(format!("{:?}", a.op).cmp(&format!("{:?}", b.op)))
+        });
+        for p in sorted_preds {
+            let _ = write!(
+                key,
+                "|{}:{}:{}:{:?}:{:?}",
+                p.target, p.id, p.property, p.op, p.value
+            );
+        }
+        key
+    }
+
     fn compute_selectivity_with_predicates(
         &self,
         graph_container: &GraphContainer,
         abstract_edge: &AbstractEdge,
         sample_size: usize,
+        vertex_sample_cache: &Arc<DashMap<LabelId, Vec<VertexId>>>,
     ) -> GCardResult<f64> {
         let path_query = self.build_path_query(abstract_edge)?;
 
@@ -675,31 +731,39 @@ impl QueryGraph {
                     GCardError::InvalidState(format!("Failed to begin transaction: {:?}", e))
                 })?;
 
-        use rand::{thread_rng, Rng};
-        let mut rng = thread_rng();
-        let mut sampled_starts = Vec::new();
-        let mut count = 0;
+        // Use cached sampled vertices for this label, or build cache on first access
+        let sampled_starts = if let Some(cached) = vertex_sample_cache.get(&src_label_id) {
+            cached.clone()
+        } else {
+            use rand::{Rng, thread_rng};
+            let mut rng = thread_rng();
+            let mut samples = Vec::new();
+            let mut count = 0usize;
 
-        {
             for (vid, label_id) in txn.iter_vertex_ids() {
                 if label_id != src_label_id {
                     continue;
                 }
                 count += 1;
-                if sampled_starts.len() < sample_size {
-                    sampled_starts.push(vid);
+                if samples.len() < sample_size {
+                    samples.push(vid);
                 } else {
                     let j = rng.gen_range(0..count);
                     if j < sample_size {
-                        sampled_starts[j] = vid;
+                        samples[j] = vid;
                     }
                 }
             }
-        }
+            vertex_sample_cache.insert(src_label_id, samples.clone());
+            samples
+        };
 
         if sampled_starts.is_empty() {
             return Ok(0.0);
         }
+
+        use rand::{Rng, thread_rng};
+        let mut rng = thread_rng();
 
         let struct_count_min: usize = 300;
         let struct_count_max: usize = 4_000;
@@ -725,15 +789,13 @@ impl QueryGraph {
             let mut walk_pred: Vec<f64> = Vec::with_capacity(PILOT_WALKS);
 
             for _ in 0..PILOT_WALKS {
-                let (sw, pw) = self.execute_compiled_walk(
-                    &mem, &txn, &compiled, start_vid, &mut rng,
-                )?;
+                let (sw, pw) =
+                    self.execute_compiled_walk(&mem, &txn, &compiled, start_vid, &mut rng)?;
                 walk_struct.push(sw);
                 walk_pred.push(pw);
             }
 
-            let pilot_mean: f64 =
-                walk_struct.iter().sum::<f64>() / walk_struct.len() as f64;
+            let pilot_mean: f64 = walk_struct.iter().sum::<f64>() / walk_struct.len() as f64;
             let need_more = if pilot_mean > 0.0 {
                 let variance: f64 = walk_struct
                     .iter()
@@ -749,9 +811,8 @@ impl QueryGraph {
             if need_more {
                 let extra = MAX_WALKS - PILOT_WALKS;
                 for _ in 0..extra {
-                    let (sw, pw) = self.execute_compiled_walk(
-                        &mem, &txn, &compiled, start_vid, &mut rng,
-                    )?;
+                    let (sw, pw) =
+                        self.execute_compiled_walk(&mem, &txn, &compiled, start_vid, &mut rng)?;
                     walk_struct.push(sw);
                     walk_pred.push(pw);
                 }
@@ -928,7 +989,10 @@ impl QueryGraph {
 
         for step in &compiled.steps {
             match step {
-                CompiledStep::Vertex { label_id, predicates } => {
+                CompiledStep::Vertex {
+                    label_id,
+                    predicates,
+                } => {
                     // Lightweight label check — no property clone
                     let actual_label = match mem.get_vertex_label_id(txn, current_vid) {
                         Ok(lid) => lid,
@@ -957,7 +1021,11 @@ impl QueryGraph {
                         }
                     }
                 }
-                CompiledStep::Edge { label_id, direction, predicates } => {
+                CompiledStep::Edge {
+                    label_id,
+                    direction,
+                    predicates,
+                } => {
                     let edge_label_id = *label_id;
 
                     // Reservoir sampling: pick a random matching neighbor in one pass
@@ -1171,10 +1239,7 @@ struct CompiledPathQuery {
 }
 
 impl CompiledPathQuery {
-    fn compile(
-        path_query: &PathQuery,
-        graph_type: &dyn GraphTypeProvider,
-    ) -> GCardResult<Self> {
+    fn compile(path_query: &PathQuery, graph_type: &dyn GraphTypeProvider) -> GCardResult<Self> {
         let mut steps = Vec::with_capacity(path_query.path_elements.len());
 
         for element in &path_query.path_elements {
@@ -1182,52 +1247,124 @@ impl CompiledPathQuery {
                 PathElement::Vertex { label, position } => {
                     let label_id = graph_type
                         .get_label_id(label)
-                        .map_err(|e| GCardError::InvalidData(format!("get_label_id {}: {:?}", label, e)))?
-                        .ok_or_else(|| GCardError::InvalidData(format!("Label {} not found", label)))?;
+                        .map_err(|e| {
+                            GCardError::InvalidData(format!("get_label_id {}: {:?}", label, e))
+                        })?
+                        .ok_or_else(|| {
+                            GCardError::InvalidData(format!("Label {} not found", label))
+                        })?;
 
-                    let predicates = if let Some(preds) = path_query.vertex_predicates.get(position) {
-                        let label_set = minigu_catalog::label_set::LabelSet::from_iter(vec![label_id]);
+                    let predicates = if let Some(preds) = path_query.vertex_predicates.get(position)
+                    {
+                        let label_set =
+                            minigu_catalog::label_set::LabelSet::from_iter(vec![label_id]);
                         let vertex_type = graph_type
                             .get_vertex_type(&label_set)
-                            .map_err(|e| GCardError::InvalidData(format!("get_vertex_type: {:?}", e)))?
-                            .ok_or_else(|| GCardError::InvalidData(format!("Vertex type not found for {}", label)))?;
+                            .map_err(|e| {
+                                GCardError::InvalidData(format!("get_vertex_type: {:?}", e))
+                            })?
+                            .ok_or_else(|| {
+                                GCardError::InvalidData(format!(
+                                    "Vertex type not found for {}",
+                                    label
+                                ))
+                            })?;
 
-                        preds.iter().map(|p| {
-                            let (prop_id, _) = vertex_type.get_property(&p.property)
-                                .map_err(|e| GCardError::InvalidData(format!("get_property {}: {:?}", p.property, e)))?
-                                .ok_or_else(|| GCardError::InvalidData(format!("Property {} not found", p.property)))?;
-                            Ok(ResolvedPredicate { prop_index: prop_id as usize, op: p.op.clone(), value: p.value.clone() })
-                        }).collect::<GCardResult<Vec<_>>>()?
+                        preds
+                            .iter()
+                            .map(|p| {
+                                let (prop_id, _) = vertex_type
+                                    .get_property(&p.property)
+                                    .map_err(|e| {
+                                        GCardError::InvalidData(format!(
+                                            "get_property {}: {:?}",
+                                            p.property, e
+                                        ))
+                                    })?
+                                    .ok_or_else(|| {
+                                        GCardError::InvalidData(format!(
+                                            "Property {} not found",
+                                            p.property
+                                        ))
+                                    })?;
+                                Ok(ResolvedPredicate {
+                                    prop_index: prop_id as usize,
+                                    op: p.op.clone(),
+                                    value: p.value.clone(),
+                                })
+                            })
+                            .collect::<GCardResult<Vec<_>>>()?
                     } else {
                         Vec::new()
                     };
 
-                    steps.push(CompiledStep::Vertex { label_id, predicates });
+                    steps.push(CompiledStep::Vertex {
+                        label_id,
+                        predicates,
+                    });
                 }
-                PathElement::Edge { label, position, direction } => {
+                PathElement::Edge {
+                    label,
+                    position,
+                    direction,
+                } => {
                     let label_id = graph_type
                         .get_label_id(label)
-                        .map_err(|e| GCardError::InvalidData(format!("get_label_id {}: {:?}", label, e)))?
-                        .ok_or_else(|| GCardError::InvalidData(format!("Label {} not found", label)))?;
+                        .map_err(|e| {
+                            GCardError::InvalidData(format!("get_label_id {}: {:?}", label, e))
+                        })?
+                        .ok_or_else(|| {
+                            GCardError::InvalidData(format!("Label {} not found", label))
+                        })?;
 
                     let predicates = if let Some(preds) = path_query.edge_predicates.get(position) {
-                        let label_set = minigu_catalog::label_set::LabelSet::from_iter(vec![label_id]);
+                        let label_set =
+                            minigu_catalog::label_set::LabelSet::from_iter(vec![label_id]);
                         let edge_type = graph_type
                             .get_edge_type(&label_set)
-                            .map_err(|e| GCardError::InvalidData(format!("get_edge_type: {:?}", e)))?
-                            .ok_or_else(|| GCardError::InvalidData(format!("Edge type not found for {}", label)))?;
+                            .map_err(|e| {
+                                GCardError::InvalidData(format!("get_edge_type: {:?}", e))
+                            })?
+                            .ok_or_else(|| {
+                                GCardError::InvalidData(format!(
+                                    "Edge type not found for {}",
+                                    label
+                                ))
+                            })?;
 
-                        preds.iter().map(|p| {
-                            let (prop_id, _) = edge_type.get_property(&p.property)
-                                .map_err(|e| GCardError::InvalidData(format!("get_property {}: {:?}", p.property, e)))?
-                                .ok_or_else(|| GCardError::InvalidData(format!("Property {} not found", p.property)))?;
-                            Ok(ResolvedPredicate { prop_index: prop_id as usize, op: p.op.clone(), value: p.value.clone() })
-                        }).collect::<GCardResult<Vec<_>>>()?
+                        preds
+                            .iter()
+                            .map(|p| {
+                                let (prop_id, _) = edge_type
+                                    .get_property(&p.property)
+                                    .map_err(|e| {
+                                        GCardError::InvalidData(format!(
+                                            "get_property {}: {:?}",
+                                            p.property, e
+                                        ))
+                                    })?
+                                    .ok_or_else(|| {
+                                        GCardError::InvalidData(format!(
+                                            "Property {} not found",
+                                            p.property
+                                        ))
+                                    })?;
+                                Ok(ResolvedPredicate {
+                                    prop_index: prop_id as usize,
+                                    op: p.op.clone(),
+                                    value: p.value.clone(),
+                                })
+                            })
+                            .collect::<GCardResult<Vec<_>>>()?
                     } else {
                         Vec::new()
                     };
 
-                    steps.push(CompiledStep::Edge { label_id, direction: direction.clone(), predicates });
+                    steps.push(CompiledStep::Edge {
+                        label_id,
+                        direction: direction.clone(),
+                        predicates,
+                    });
                 }
             }
         }

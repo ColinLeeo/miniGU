@@ -288,7 +288,16 @@ add_e2e_tests!(
 );
 add_e2e_tests!("dql", ["dql"]);
 add_e2e_tests!("dcl", ["session_set"]);
-add_e2e_tests!("dml", ["insert", "match_and_insert", "match", "match_filter", "dml_dql"]);
+add_e2e_tests!(
+    "dml",
+    [
+        "insert",
+        "match_and_insert",
+        "match",
+        "match_filter",
+        "dml_dql"
+    ]
+);
 add_e2e_tests!("misc", ["text2graph", "vector_index"]);
 add_e2e_tests!(
     "utility",
@@ -320,7 +329,16 @@ add_parser_tests!(
 );
 add_parser_tests!("dql", ["dql"]);
 add_parser_tests!("dcl", ["session_set"]);
-add_parser_tests!("dml", ["insert", "match_and_insert", "match", "match_filter", "dml_dql"]);
+add_parser_tests!(
+    "dml",
+    [
+        "insert",
+        "match_and_insert",
+        "match",
+        "match_filter",
+        "dml_dql"
+    ]
+);
 add_parser_tests!("misc", ["text2graph", "vector_index"]);
 add_parser_tests!(
     "utility",
@@ -359,7 +377,9 @@ fn e2e_persistence_reopen_database() {
         let mut session = db.session().unwrap();
 
         // Create test graph with data
-        session.query("CALL create_test_graph_data('g', 10)").unwrap();
+        session
+            .query("CALL create_test_graph_data('g', 10)")
+            .unwrap();
         session.query("SESSION SET GRAPH g").unwrap();
 
         // Query to verify data exists
@@ -406,7 +426,9 @@ fn e2e_persistence_reopen_with_filter() {
         };
         let db = Database::open(db_path.clone(), config).unwrap();
         let mut session = db.session().unwrap();
-        session.query("CALL create_test_graph_data('g', 10)").unwrap();
+        session
+            .query("CALL create_test_graph_data('g', 10)")
+            .unwrap();
     }
 
     // Phase 2: Reopen and run filtered query
@@ -426,7 +448,10 @@ fn e2e_persistence_reopen_with_filter() {
         let output = result_to_string(&result);
 
         // Verify: should have exactly 1 row with "person0"
-        assert!(output.contains("person0"), "Should find person0 after reopen");
+        assert!(
+            output.contains("person0"),
+            "Should find person0 after reopen"
+        );
         // The output contains "person" in the header type info too, so just check for the data row
         assert!(
             output.contains("1 rows"),
@@ -448,7 +473,9 @@ fn e2e_persistence_reopen_match_path() {
         };
         let db = Database::open(db_path.clone(), config).unwrap();
         let mut session = db.session().unwrap();
-        session.query("CALL create_test_graph_data('g', 10)").unwrap();
+        session
+            .query("CALL create_test_graph_data('g', 10)")
+            .unwrap();
     }
 
     // Phase 2: Reopen and run path query

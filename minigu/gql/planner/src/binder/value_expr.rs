@@ -66,7 +66,9 @@ impl Binder<'_> {
                             .iter()
                             .find(|f| f.name() == prop_name)
                             .ok_or_else(|| {
-                                BindError::VariableNotFound(format!("{}.{}", var_name, prop_name).into())
+                                BindError::VariableNotFound(
+                                    format!("{}.{}", var_name, prop_name).into(),
+                                )
                             })?;
                         Ok(BoundExpr::property(
                             var_name.to_string(),
@@ -74,10 +76,9 @@ impl Binder<'_> {
                             prop_field.ty().clone(),
                         ))
                     } else {
-                        Err(BindError::VariableNotFound(format!(
-                            "{} is not a vertex",
-                            var_name
-                        ).into()))
+                        Err(BindError::VariableNotFound(
+                            format!("{} is not a vertex", var_name).into(),
+                        ))
                     }
                 } else {
                     not_implemented("non-variable property source", None)

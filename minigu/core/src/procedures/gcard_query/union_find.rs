@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+
 use minigu_common::types::VertexId;
 
 pub struct UnionFind {
@@ -57,4 +58,3 @@ impl UnionFind {
         true
     }
 }
-

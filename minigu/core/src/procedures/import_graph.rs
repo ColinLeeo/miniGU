@@ -37,12 +37,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-
-use dashmap::DashMap as ConcurrentMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use csv::ReaderBuilder;
+use dashmap::DashMap as ConcurrentMap;
 use minigu_catalog::label_set::LabelSet;
 use minigu_catalog::memory::graph_type::{
     MemoryEdgeTypeCatalog, MemoryGraphTypeCatalog, MemoryVertexTypeCatalog,
@@ -100,43 +99,99 @@ fn property_to_scalar_value(property: &Property, value: &str) -> Result<ScalarVa
                 "Cannot parse empty string for non-nullable property '{}' of type {:?}",
                 property.name(),
                 property.logical_type()
-            ).into());
+            )
+            .into());
         }
     }
 
     match property.logical_type() {
         LogicalType::Int8 => Ok(ScalarValue::Int8(Some(value.parse().map_err(|e| {
-            anyhow::anyhow!("Cannot parse Int8 from '{}' for property '{}': {}", value, property.name(), e)
+            anyhow::anyhow!(
+                "Cannot parse Int8 from '{}' for property '{}': {}",
+                value,
+                property.name(),
+                e
+            )
         })?))),
         LogicalType::Int16 => Ok(ScalarValue::Int16(Some(value.parse().map_err(|e| {
-            anyhow::anyhow!("Cannot parse Int16 from '{}' for property '{}': {}", value, property.name(), e)
+            anyhow::anyhow!(
+                "Cannot parse Int16 from '{}' for property '{}': {}",
+                value,
+                property.name(),
+                e
+            )
         })?))),
         LogicalType::Int32 => Ok(ScalarValue::Int32(Some(value.parse().map_err(|e| {
-            anyhow::anyhow!("Cannot parse Int32 from '{}' for property '{}': {}", value, property.name(), e)
+            anyhow::anyhow!(
+                "Cannot parse Int32 from '{}' for property '{}': {}",
+                value,
+                property.name(),
+                e
+            )
         })?))),
         LogicalType::Int64 => Ok(ScalarValue::Int64(Some(value.parse().map_err(|e| {
-            anyhow::anyhow!("Cannot parse Int64 from '{}' for property '{}': {}", value, property.name(), e)
+            anyhow::anyhow!(
+                "Cannot parse Int64 from '{}' for property '{}': {}",
+                value,
+                property.name(),
+                e
+            )
         })?))),
         LogicalType::UInt8 => Ok(ScalarValue::UInt8(Some(value.parse().map_err(|e| {
-            anyhow::anyhow!("Cannot parse UInt8 from '{}' for property '{}': {}", value, property.name(), e)
+            anyhow::anyhow!(
+                "Cannot parse UInt8 from '{}' for property '{}': {}",
+                value,
+                property.name(),
+                e
+            )
         })?))),
         LogicalType::UInt16 => Ok(ScalarValue::UInt16(Some(value.parse().map_err(|e| {
-            anyhow::anyhow!("Cannot parse UInt16 from '{}' for property '{}': {}", value, property.name(), e)
+            anyhow::anyhow!(
+                "Cannot parse UInt16 from '{}' for property '{}': {}",
+                value,
+                property.name(),
+                e
+            )
         })?))),
         LogicalType::UInt32 => Ok(ScalarValue::UInt32(Some(value.parse().map_err(|e| {
-            anyhow::anyhow!("Cannot parse UInt32 from '{}' for property '{}': {}", value, property.name(), e)
+            anyhow::anyhow!(
+                "Cannot parse UInt32 from '{}' for property '{}': {}",
+                value,
+                property.name(),
+                e
+            )
         })?))),
         LogicalType::UInt64 => Ok(ScalarValue::UInt64(Some(value.parse().map_err(|e| {
-            anyhow::anyhow!("Cannot parse UInt64 from '{}' for property '{}': {}", value, property.name(), e)
+            anyhow::anyhow!(
+                "Cannot parse UInt64 from '{}' for property '{}': {}",
+                value,
+                property.name(),
+                e
+            )
         })?))),
         LogicalType::Boolean => Ok(ScalarValue::Boolean(Some(value.parse().map_err(|e| {
-            anyhow::anyhow!("Cannot parse Boolean from '{}' for property '{}': {}", value, property.name(), e)
+            anyhow::anyhow!(
+                "Cannot parse Boolean from '{}' for property '{}': {}",
+                value,
+                property.name(),
+                e
+            )
         })?))),
         LogicalType::Float32 => Ok(ScalarValue::Float32(Some(value.parse().map_err(|e| {
-            anyhow::anyhow!("Cannot parse Float32 from '{}' for property '{}': {}", value, property.name(), e)
+            anyhow::anyhow!(
+                "Cannot parse Float32 from '{}' for property '{}': {}",
+                value,
+                property.name(),
+                e
+            )
         })?))),
         LogicalType::Float64 => Ok(ScalarValue::Float64(Some(value.parse().map_err(|e| {
-            anyhow::anyhow!("Cannot parse Float64 from '{}' for property '{}': {}", value, property.name(), e)
+            anyhow::anyhow!(
+                "Cannot parse Float64 from '{}' for property '{}': {}",
+                value,
+                property.name(),
+                e
+            )
         })?))),
         LogicalType::String => Ok(ScalarValue::String(Some(value.to_string()))),
         LogicalType::Null => Err(anyhow::anyhow!("str isn't empty").into()),
@@ -173,7 +228,8 @@ pub fn import<P: AsRef<Path>>(
     }
 
     let db_path = context.database().config().db_path.clone();
-    let (graph, graph_type) = import_internal(manifest_path.as_ref(), db_path.as_deref(), &graph_name)?;
+    let (graph, graph_type) =
+        import_internal(manifest_path.as_ref(), db_path.as_deref(), &graph_name)?;
 
     let container = GraphContainer::new(
         Arc::clone(&graph_type),

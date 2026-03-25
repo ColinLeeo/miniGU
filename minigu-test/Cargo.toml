@@ -41,12 +41,12 @@ path = "src/sqllogictest.rs"
 harness = false
 name = "alloc"
 path = "./benches/alloc.rs"
-
-[[bench]]
-harness = false
-name = "parse"
-path = "./benches/parse.rs"
-required-features = ["bench-antlr4"]
+#
+#[[bench]]
+#harness = false
+#name = "parse"
+#path = "./benches/parse.rs"
+#required-features = ["bench-antlr4"]
 
 [package.metadata.cargo-machete]
 ignored = ["cmake"]

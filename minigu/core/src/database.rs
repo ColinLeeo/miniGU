@@ -12,9 +12,7 @@ use minigu_context::graph::{GraphContainer, GraphStorage};
 use minigu_storage::tp::MemoryGraph;
 use rayon::ThreadPoolBuilder;
 
-use crate::catalog_persistence::{
-    catalog_entry_to_graph_type, graph_data_path, load_catalog,
-};
+use crate::catalog_persistence::{catalog_entry_to_graph_type, graph_data_path, load_catalog};
 use crate::error::Result;
 use crate::procedures::build_predefined_procedures;
 use crate::session::Session;
@@ -45,10 +43,8 @@ impl Database {
                 let data_path = graph_data_path(&db_path, graph_name);
                 let graph = MemoryGraph::with_db_file(&data_path)?;
                 let graph_type = catalog_entry_to_graph_type(entry);
-                let container = Arc::new(GraphContainer::new(
-                    graph_type,
-                    GraphStorage::Memory(graph),
-                ));
+                let container =
+                    Arc::new(GraphContainer::new(graph_type, GraphStorage::Memory(graph)));
                 default_schema.add_graph(graph_name.clone(), container);
             }
         }

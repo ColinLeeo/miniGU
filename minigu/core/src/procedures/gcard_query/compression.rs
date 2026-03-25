@@ -175,8 +175,9 @@ pub fn decode_raw_u64s(data: &[u8]) -> Option<Vec<u64>> {
 
 // ── String dictionary for AltKey ────────────────────────────────────────────
 
-use crate::procedures::gcard_query::catalog::AltKey;
 use std::collections::HashMap;
+
+use crate::procedures::gcard_query::catalog::AltKey;
 
 /// Build a string dictionary from a set of AltKeys.
 /// Returns (dictionary: Vec<String>, encoded_keys: Vec<Vec<u32>>).
@@ -348,21 +349,9 @@ pub fn report_component_sizes(stat: &super::Statistic) {
         total_bucket_ids_raw,
         total_bucket_ids_compressed,
     );
-    print_row(
-        "prefix (zstd)",
-        total_prefix_raw,
-        total_prefix_compressed,
-    );
-    print_row(
-        "res_vec (raw)",
-        total_res_vec_raw,
-        total_res_vec_encoded,
-    );
-    print_row(
-        "alt_keys (dict)",
-        alt_key_raw_size,
-        alt_key_compressed,
-    );
+    print_row("prefix (zstd)", total_prefix_raw, total_prefix_compressed);
+    print_row("res_vec (raw)", total_res_vec_raw, total_res_vec_encoded);
+    print_row("alt_keys (dict)", alt_key_raw_size, alt_key_compressed);
     println!("  {:-<56}", "");
     print_row("TOTAL", total_raw, total_compressed);
     println!("Compressed statistic size: {} bytes", total_compressed);
@@ -474,7 +463,10 @@ mod tests {
         assert_eq!(encoded, keys_decoded);
 
         // Reconstruct AltKeys
-        let k1_restored: Vec<String> = keys_decoded[0].iter().map(|&i| dict_decoded[i as usize].clone()).collect();
+        let k1_restored: Vec<String> = keys_decoded[0]
+            .iter()
+            .map(|&i| dict_decoded[i as usize].clone())
+            .collect();
         assert_eq!(k1.0, k1_restored);
     }
 }

@@ -43,7 +43,7 @@ pub fn build_predefined_procedures() -> Vec<(String, Procedure)> {
         ),
         (
             "load_catalog".to_string(),
-            gcard_query::create_catalog::build_load_procedure(),
+            gcard_query::load_catalog::build_load_procedure(),
         ),
         (
             "build_ldbc_manifest".to_string(),

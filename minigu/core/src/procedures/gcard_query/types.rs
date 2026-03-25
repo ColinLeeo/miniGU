@@ -3,10 +3,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use minigu_common::types::{EdgeId, VertexId};
-use serde::{Deserialize, Serialize};
 use minigu_common::value::ScalarValue;
-use crate::procedures::gcard_query::query_graph::{QueryGraph, QueryEdge};
+use serde::{Deserialize, Serialize};
+
 pub use super::degreepiecewise::Pcf;
+use crate::procedures::gcard_query::query_graph::{QueryEdge, QueryGraph};
 
 #[derive(Debug, Clone)]
 pub struct AbstractEdge {
@@ -123,11 +124,14 @@ impl Query {
         }
 
         for vertex_def in &self.vertices {
-            graph.inner.vertices.insert(vertex_def.id, QueryVertex {
-                id: vertex_def.id,
-                label: vertex_def.label.to_lowercase(),
-                predicates: Vec::new(),
-            });
+            graph.inner.vertices.insert(
+                vertex_def.id,
+                QueryVertex {
+                    id: vertex_def.id,
+                    label: vertex_def.label.to_lowercase(),
+                    predicates: Vec::new(),
+                },
+            );
         }
 
         for edge_def in &self.edges {
@@ -146,13 +150,16 @@ impl Query {
                 ));
             }
 
-            graph.inner.edges.insert(edge_def.id, QueryEdge {
-                id: edge_def.id,
-                label: edge_def.label.to_lowercase(),
-                src_vertex_id: edge_def.src,
-                dst_vertex_id: edge_def.dst,
-                predicates: Vec::new(),
-            });
+            graph.inner.edges.insert(
+                edge_def.id,
+                QueryEdge {
+                    id: edge_def.id,
+                    label: edge_def.label.to_lowercase(),
+                    src_vertex_id: edge_def.src,
+                    dst_vertex_id: edge_def.dst,
+                    predicates: Vec::new(),
+                },
+            );
 
             graph
                 .inner

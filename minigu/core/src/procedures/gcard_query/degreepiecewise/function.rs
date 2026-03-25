@@ -1,4 +1,5 @@
 use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 use super::super::error::GCardResult;
@@ -136,11 +137,10 @@ impl PiecewiseConstantFunction {
             return true;
         }
         if self.constants[0] == 1.0 {
-            return true
+            return true;
         }
         false
     }
-
 
     pub fn get_num_rows(&self) -> f64 {
         self.cumulative_rows.last().copied().unwrap_or(0.0)
@@ -153,7 +153,7 @@ impl PiecewiseConstantFunction {
 
         let total_rows = self.get_num_rows();
         let target_rows = ratio * total_rows;
-        
+
         if target_rows <= 0.0 {
             return Self::empty();
         }

@@ -1,6 +1,6 @@
 use miette::Diagnostic;
-use thiserror::Error;
 use minigu_storage::error::StorageError;
+use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum GCardError {

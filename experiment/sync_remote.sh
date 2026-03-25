@@ -49,8 +49,7 @@ RSYNC_EXCLUDES=(
     "target/"
 
     # 实验数据（大文件，远程应已有或单独准备）
-    "experiment/dataset/ldbc/sf*/minigu_db/"
-    "experiment/dataset/ldbc/sf*/*.csv"
+    "experiment/dataset/ldbc/sf*/"
     "experiment/duckdb"
 
     # 实验结果

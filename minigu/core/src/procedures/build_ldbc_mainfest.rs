@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use csv::{ReaderBuilder, WriterBuilder};
 use minigu_common::data_type::LogicalType;
 use minigu_context::procedure::Procedure;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// generate ldbc manifest in procedure.
 pub fn build_procedure() -> Procedure {
@@ -126,7 +126,7 @@ fn scan_ldbc_directory(
             all_files.push(path);
         }
     }
-    
+
     // 第一步：识别所有顶点文件（没有下划线的），建立顶点标签集合
     let mut vertex_labels: HashSet<String> = HashSet::new();
     for path in &all_files {
@@ -134,36 +134,32 @@ fn scan_ldbc_directory(
             .file_name()
             .and_then(|s| s.to_str())
             .ok_or_else(|| anyhow::anyhow!("Invalid filename: {}", path.display()))?;
-        
-        let name_without_ext = filename
-            .strip_suffix(".csv")
-            .unwrap_or(filename);
-        
+
+        let name_without_ext = filename.strip_suffix(".csv").unwrap_or(filename);
+
         // 如果没有下划线，肯定是顶点文件
         if !name_without_ext.contains('_') {
             vertex_labels.insert(name_without_ext.to_string());
             vertex_files.push((name_without_ext.to_string(), path.clone()));
         }
     }
-    
+
     // 第二步：处理边文件（包含下划线的文件）
     for path in all_files {
         let filename = path
             .file_name()
             .and_then(|s| s.to_str())
             .ok_or_else(|| anyhow::anyhow!("Invalid filename: {}", path.display()))?;
-        
-        let name_without_ext = filename
-            .strip_suffix(".csv")
-            .unwrap_or(filename);
-        
+
+        let name_without_ext = filename.strip_suffix(".csv").unwrap_or(filename);
+
         // 如果包含下划线，尝试解析为边文件
         if name_without_ext.contains('_') {
             // 检查是否已经在顶点文件中（避免重复）
             if vertex_labels.contains(name_without_ext) {
                 continue;
             }
-            
+
             // 尝试从文件名提取 src_label 和 dst_label
             // 格式：src_label_edgeType_dst_label
             // 策略：找到第一个和最后一个单词，如果它们在顶点标签集合中，就是边文件
@@ -171,13 +167,13 @@ fn scan_ldbc_directory(
             if parts.len() >= 2 {
                 let first_part = parts[0];
                 let last_part = parts[parts.len() - 1];
-                
+
                 // 如果第一个和最后一个部分都在顶点标签集合中，认为是边文件
                 if vertex_labels.contains(first_part) && vertex_labels.contains(last_part) {
                     let src_label = first_part.to_string();
                     let dst_label = last_part.to_string();
                     let edge_label = name_without_ext.to_string(); // 整个文件名就是边类型
-                    
+
                     edge_files.push((edge_label, src_label, dst_label, path));
                 } else {
                     // 如果无法识别，可能是顶点文件（包含下划线的顶点）
@@ -189,16 +185,14 @@ fn scan_ldbc_directory(
             }
         }
     }
-    
+
     Ok(())
 }
 
 fn infer_properties_from_csv_vertex(
     csv_path: &Path,
 ) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut rdr = ReaderBuilder::new()
-        .has_headers(true)
-        .from_path(csv_path)?;
+    let mut rdr = ReaderBuilder::new().has_headers(true).from_path(csv_path)?;
 
     let headers = rdr.headers()?.iter().collect::<Vec<_>>();
     if headers.len() <= 1 {
@@ -210,9 +204,7 @@ fn infer_properties_from_csv_vertex(
     let mut properties: Vec<Value> = Vec::new();
 
     // 重新创建 reader 来读取数据行
-    let mut data_rdr = ReaderBuilder::new()
-        .has_headers(true)
-        .from_path(csv_path)?;
+    let mut data_rdr = ReaderBuilder::new().has_headers(true).from_path(csv_path)?;
 
     if let Some(result) = data_rdr.records().next() {
         let record = result?;
@@ -243,9 +235,7 @@ fn infer_properties_from_csv_vertex(
 fn infer_properties_from_csv_edge_new(
     csv_path: &Path,
 ) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut rdr = ReaderBuilder::new()
-        .has_headers(true)
-        .from_path(csv_path)?;
+    let mut rdr = ReaderBuilder::new().has_headers(true).from_path(csv_path)?;
 
     let headers = rdr.headers()?.iter().collect::<Vec<_>>();
     // 新格式：src|dst|prop1|prop2|...
@@ -258,9 +248,7 @@ fn infer_properties_from_csv_edge_new(
     let mut properties: Vec<Value> = Vec::new();
 
     // 重新创建 reader 来读取数据行
-    let mut data_rdr = ReaderBuilder::new()
-        .has_headers(true)
-        .from_path(csv_path)?;
+    let mut data_rdr = ReaderBuilder::new().has_headers(true).from_path(csv_path)?;
 
     if let Some(result) = data_rdr.records().next() {
         let record = result?;

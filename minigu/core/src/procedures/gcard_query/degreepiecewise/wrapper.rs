@@ -1,9 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::super::error::GCardResult;
-
-use super::function::{pointwise_function_min, pointwise_function_mult, PiecewiseConstantFunction};
-
+use super::function::{PiecewiseConstantFunction, pointwise_function_min, pointwise_function_mult};
 
 pub type Pcf = PiecewiseConstantFunction;
 

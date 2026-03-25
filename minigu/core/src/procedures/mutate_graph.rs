@@ -59,9 +59,9 @@ pub fn build_procedure() -> Procedure {
     Procedure::new(parameters, Some(schema), move |context, args| {
         // ── parse args ───────────────────────────────────────────────────────
         let graph_name = parse_str(&args[0], "graph_name")?;
-        let operation  = parse_str(&args[1], "operation")?;
-        let label_a    = parse_str(&args[2], "label_a")?;
-        let label_b    = parse_str(&args[3], "label_b")?;
+        let operation = parse_str(&args[1], "operation")?;
+        let label_a = parse_str(&args[2], "label_a")?;
+        let label_b = parse_str(&args[3], "label_b")?;
         let edge_label = parse_str(&args[4], "edge_label")?;
         let delta_count = args[5]
             .to_i64()
@@ -98,9 +98,7 @@ pub fn build_procedure() -> Procedure {
         let id_to_name: HashMap<LabelId, String> = graph_type
             .label_names()
             .into_iter()
-            .filter_map(|name| {
-                graph_type.get_label_id(&name).ok()?.map(|id| (id, name))
-            })
+            .filter_map(|name| graph_type.get_label_id(&name).ok()?.map(|id| (id, name)))
             .collect();
 
         // Extract the GCard update log if it exists (None = GCard not built yet).
@@ -131,7 +129,7 @@ pub fn build_procedure() -> Procedure {
             }
 
             "add_edges" => {
-                let label_b_id    = resolve_label(&*graph_type, &label_b)?;
+                let label_b_id = resolve_label(&*graph_type, &label_b)?;
                 let edge_label_id = resolve_label(&*graph_type, &edge_label)?;
                 let n = compute_delta(&mem, label_a_id, delta_count, delta_percent)?;
                 let added = add_edges(
@@ -148,12 +146,10 @@ pub fn build_procedure() -> Procedure {
                 (added as i64, format!("{label_a}->{label_b}"))
             }
 
-            other => {
-                return Err(anyhow::anyhow!(
-                    "unknown operation `{other}`; expected add_vertices | delete_vertices | add_edges"
-                )
-                .into())
-            }
+            other => return Err(anyhow::anyhow!(
+                "unknown operation `{other}`; expected add_vertices | delete_vertices | add_edges"
+            )
+            .into()),
         };
 
         let chunk = DataChunk::new(vec![
@@ -236,7 +232,10 @@ fn add_vertices(
 
     for i in 0..count {
         let vid: VertexId = max_vid + 1 + i as u64;
-        mem.create_vertex(&txn, Vertex::new(vid, label_id, PropertyRecord::new(vec![])))?;
+        mem.create_vertex(
+            &txn,
+            Vertex::new(vid, label_id, PropertyRecord::new(vec![])),
+        )?;
     }
 
     txn.commit()?;
@@ -368,14 +367,28 @@ fn collect_neighbors(
     // Outgoing: vid → nbr
     for result in txn.iter_adjacency_outgoing(vid) {
         if let Ok(nbr) = result {
-            push_neighbor(mem, txn, nbr.neighbor_id(), nbr.label_id(), id_to_name, &mut neighbors);
+            push_neighbor(
+                mem,
+                txn,
+                nbr.neighbor_id(),
+                nbr.label_id(),
+                id_to_name,
+                &mut neighbors,
+            );
         }
     }
 
     // Incoming: nbr → vid
     for result in txn.iter_adjacency_incoming(vid) {
         if let Ok(nbr) = result {
-            push_neighbor(mem, txn, nbr.neighbor_id(), nbr.label_id(), id_to_name, &mut neighbors);
+            push_neighbor(
+                mem,
+                txn,
+                nbr.neighbor_id(),
+                nbr.label_id(),
+                id_to_name,
+                &mut neighbors,
+            );
         }
     }
 
@@ -390,8 +403,14 @@ fn push_neighbor(
     id_to_name: &HashMap<LabelId, String>,
     out: &mut Vec<(VertexId, String, String)>,
 ) {
-    let Some(edge_label_name) = id_to_name.get(&edge_label_id) else { return };
-    let Ok(nbr_vertex) = mem.get_vertex(txn, nbr_vid) else { return };
-    let Some(nbr_label_name) = id_to_name.get(&nbr_vertex.label_id) else { return };
+    let Some(edge_label_name) = id_to_name.get(&edge_label_id) else {
+        return;
+    };
+    let Ok(nbr_vertex) = mem.get_vertex(txn, nbr_vid) else {
+        return;
+    };
+    let Some(nbr_label_name) = id_to_name.get(&nbr_vertex.label_id) else {
+        return;
+    };
     out.push((nbr_vid, nbr_label_name.clone(), edge_label_name.clone()));
 }

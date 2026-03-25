@@ -19,8 +19,8 @@ use minigu_execution::error::ExecutionError;
 use minigu_transaction::IsolationLevel::Serializable;
 use minigu_transaction::{GraphTxnManager, Transaction};
 
-use crate::procedures::gcard_query::update_log::GCardUpdateLog;
 use crate::procedures::gcard_query::Statistic;
+use crate::procedures::gcard_query::update_log::GCardUpdateLog;
 
 // ── GCard compact + apply ─────────────────────────────────────────────────────
 

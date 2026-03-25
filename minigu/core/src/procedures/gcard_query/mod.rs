@@ -5,22 +5,23 @@ pub mod compact_update_log;
 pub mod compression;
 pub mod create_catalog;
 mod degreepiecewise;
-mod statistic;
 pub mod error;
 pub mod stat_quality;
+mod statistic;
 pub mod update_log;
 
 pub use block_statistic::BlockStatistic;
 pub use catalog::make_alt_key;
 pub use statistic::Statistic;
 mod graph;
+pub mod load_catalog;
 mod query_graph;
 pub mod types;
 mod union_find;
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{fmt, fs, io};
 
 use minigu_common::data_chunk;
@@ -102,7 +103,9 @@ pub fn build_procedure() -> Procedure {
             .degree_seq_graph_compressed()
             .as_ref()
             .and_then(|arc| arc.downcast_ref::<DegreeSeqGraphCompressed>().cloned())
-            .ok_or_else(|| anyhow::anyhow!("degree_seq_graph_compressed not set (run GCard_build first)"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("degree_seq_graph_compressed not set (run GCard_build first)")
+            })?;
 
         let query_json_path = args[0]
             .try_as_string()
@@ -159,7 +162,7 @@ pub fn build_procedure() -> Procedure {
             .get(5)
             .and_then(|a| a.to_i32().ok())
             .map(|n| if n <= 0 { 50 } else { n as usize })
-            .unwrap_or(50);
+            .unwrap_or(10);
 
         let cardinality = match query_graph.build_abstract_graph(
             max_path_length,
@@ -254,8 +257,9 @@ pub fn build_procedure() -> Procedure {
             .and_then(|n| n.to_str());
         println!("{}, cardinality: {}", stem.unwrap(), cardinality.ceil());
 
-        Ok(vec![data_chunk!((Int64, [
-            Some(cardinality.ceil() as i64)
-        ]))])
+        Ok(vec![data_chunk!((
+            Int64,
+            [Some(cardinality.ceil() as i64)]
+        ))])
     })
 }

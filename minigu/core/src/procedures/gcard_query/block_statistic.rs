@@ -4,7 +4,9 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::procedures::gcard_query::catalog::CompressedDegreeSeq;
-use crate::procedures::gcard_query::degreepiecewise::fast_compressor::{build_bounds, get_bucket_index};
+use crate::procedures::gcard_query::degreepiecewise::fast_compressor::{
+    build_bounds, get_bucket_index,
+};
 use crate::procedures::gcard_query::error::{GCardError, GCardResult};
 
 const BUCKET_BASE: u64 = 2;
@@ -141,7 +143,7 @@ impl BlockStatistic {
             counts,
         }))
     }
-    
+
     pub fn disk_size(&self) -> usize {
         self.serialize().len()
     }
@@ -160,21 +162,35 @@ impl BlockStatistic {
     }
 
     pub fn deserialize(bytes: &[u8], entry_count: usize) -> GCardResult<Self> {
-        let need = entry_count.checked_mul(2).ok_or_else(|| GCardError::InvalidData("entry_count overflow".into()))?;
+        let need = entry_count
+            .checked_mul(2)
+            .ok_or_else(|| GCardError::InvalidData("entry_count overflow".into()))?;
         if bytes.len() < need + 8 {
-            return Err(GCardError::InvalidData("block too short for bucket_ids and prefix".into()));
+            return Err(GCardError::InvalidData(
+                "block too short for bucket_ids and prefix".into(),
+            ));
         }
         let bucket_ids = bytes[0..entry_count].to_vec();
         let prefix = bytes[entry_count..entry_count + entry_count].to_vec();
-        let rlen = u64::from_le_bytes(bytes[need..need + 8].try_into().map_err(|_| GCardError::InvalidData("res_vec len".into()))?) as usize;
+        let rlen = u64::from_le_bytes(
+            bytes[need..need + 8]
+                .try_into()
+                .map_err(|_| GCardError::InvalidData("res_vec len".into()))?,
+        ) as usize;
         let res_start = need + 8;
         if bytes.len() < res_start + rlen * 8 {
-            return Err(GCardError::InvalidData("block too short for res_vec".into()));
+            return Err(GCardError::InvalidData(
+                "block too short for res_vec".into(),
+            ));
         }
         let mut res_vec = Vec::with_capacity(rlen);
         for i in 0..rlen {
             let start = res_start + i * 8;
-            let v = u64::from_le_bytes(bytes[start..start + 8].try_into().map_err(|_| GCardError::InvalidData("res_vec u64".into()))?);
+            let v = u64::from_le_bytes(
+                bytes[start..start + 8]
+                    .try_into()
+                    .map_err(|_| GCardError::InvalidData("res_vec u64".into()))?,
+            );
             res_vec.push(v);
         }
         Ok(BlockStatistic {
@@ -200,7 +216,8 @@ impl<'de> Deserialize<'de> for BlockStatistic {
         if bytes.len() < 8 {
             return Err(serde::de::Error::custom("block too short for entry_count"));
         }
-        let entry_count = u64::from_le_bytes(bytes[0..8].try_into().map_err(serde::de::Error::custom)?) as usize;
+        let entry_count =
+            u64::from_le_bytes(bytes[0..8].try_into().map_err(serde::de::Error::custom)?) as usize;
         Self::deserialize(&bytes[8..], entry_count).map_err(serde::de::Error::custom)
     }
 }

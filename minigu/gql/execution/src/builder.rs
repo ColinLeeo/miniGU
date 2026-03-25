@@ -8,10 +8,8 @@ use minigu_common::data_type::{DataField, DataSchema, LogicalType};
 use minigu_common::types::VertexIdArray;
 use minigu_context::graph::GraphContainer;
 use minigu_context::session::SessionContext;
-use minigu_planner::bound::{BoundExpr, BoundExprKind};
+use minigu_planner::bound::{BoundBinaryOp, BoundExpr, BoundExprKind};
 use minigu_planner::plan::{PlanData, PlanNode};
-
-use minigu_planner::bound::BoundBinaryOp;
 
 use crate::evaluator::BoxedEvaluator;
 use crate::evaluator::binary::{Binary, BinaryOp};
@@ -84,8 +82,7 @@ impl ExecutorBuilder {
                                     {
                                         for property in vertex_type.properties().iter() {
                                             property_ids.push(property.0);
-                                            property_names
-                                                .push(property.1.name().to_string());
+                                            property_names.push(property.1.name().to_string());
                                         }
                                     }
                                     property_ids
@@ -124,7 +121,10 @@ impl ExecutorBuilder {
             PlanNode::PhysicalNodeScan(node_scan) => {
                 // NodeScan provide graph id and label, Handle in next pr.
                 assert_eq!(children.len(), 0);
-                let plan_schema = physical_plan.schema().expect("NodeScan should have a schema").clone();
+                let plan_schema = physical_plan
+                    .schema()
+                    .expect("NodeScan should have a schema")
+                    .clone();
                 let container: Arc<GraphContainer> = self
                     .session
                     .current_graph
@@ -144,7 +144,10 @@ impl ExecutorBuilder {
             }
             PlanNode::PhysicalExpand(expand) => {
                 assert_eq!(children.len(), 1);
-                let plan_schema = physical_plan.schema().expect("Expand should have a schema").clone();
+                let plan_schema = physical_plan
+                    .schema()
+                    .expect("Expand should have a schema")
+                    .clone();
                 let (child, child_actual_schema) = self.build_executor(&children[0]);
                 let container: Arc<GraphContainer> = self
                     .session
@@ -171,7 +174,10 @@ impl ExecutorBuilder {
                 );
                 let column_indices_to_flatten: Vec<usize> =
                     (num_child_columns..num_child_columns + 2).collect();
-                (Box::new(expand_executor.flatten(column_indices_to_flatten)), plan_schema)
+                (
+                    Box::new(expand_executor.flatten(column_indices_to_flatten)),
+                    plan_schema,
+                )
             }
             PlanNode::PhysicalProject(project) => {
                 assert_eq!(children.len(), 1);
@@ -188,33 +194,34 @@ impl ExecutorBuilder {
                         && let BoundExprKind::Variable(var_name) = &expr.kind
                     {
                         // Check if properties are already scanned (e.g., by a child Filter)
-                        let first_prop_qualified =
-                            if let Some(label_specs) = output_schema.get_var_label(var_name.as_str())
+                        let first_prop_qualified = if let Some(label_specs) =
+                            output_schema.get_var_label(var_name.as_str())
+                        {
+                            let container_tmp: Arc<GraphContainer> = self
+                                .session
+                                .current_graph
+                                .clone()
+                                .expect("current graph should be set")
+                                .object()
+                                .clone()
+                                .downcast_arc::<GraphContainer>()
+                                .expect("failed to downcast to GraphContainer");
+                            let graph_type = container_tmp.graph_type();
+                            if let Some(first_label_set) = label_specs.first()
+                                && let Ok(Some(vertex_type)) = graph_type
+                                    .get_vertex_type(&LabelSet::from_iter(first_label_set.clone()))
                             {
-                                let container_tmp: Arc<GraphContainer> = self
-                                    .session
-                                    .current_graph
-                                    .clone()
-                                    .expect("current graph should be set")
-                                    .object()
-                                    .clone()
-                                    .downcast_arc::<GraphContainer>()
-                                    .expect("failed to downcast to GraphContainer");
-                                let graph_type = container_tmp.graph_type();
-                                if let Some(first_label_set) = label_specs.first()
-                                    && let Ok(Some(vertex_type)) = graph_type.get_vertex_type(
-                                        &LabelSet::from_iter(first_label_set.clone()),
-                                    )
-                                {
-                                    vertex_type.properties().iter().next().map(|p| {
-                                        format!("{}_{}", var_name, p.1.name())
-                                    })
-                                } else {
-                                    None
-                                }
+                                vertex_type
+                                    .properties()
+                                    .iter()
+                                    .next()
+                                    .map(|p| format!("{}_{}", var_name, p.1.name()))
                             } else {
                                 None
-                            };
+                            }
+                        } else {
+                            None
+                        };
 
                         // Skip if properties already exist in schema (scanned by child)
                         if let Some(ref first_prop) = first_prop_qualified {
@@ -292,17 +299,25 @@ impl ExecutorBuilder {
                     .iter()
                     .map(|e| self.build_evaluator(e, &updated_schema))
                     .collect();
-                let output_schema = physical_plan.schema().expect("there should be a schema").clone();
+                let output_schema = physical_plan
+                    .schema()
+                    .expect("there should be a schema")
+                    .clone();
                 (Box::new(child_executor.project(evaluators)), output_schema)
             }
             PlanNode::PhysicalCall(call) => {
                 assert!(children.is_empty());
-                let plan_schema = physical_plan.schema().map(|s| s.clone())
+                let plan_schema = physical_plan
+                    .schema()
+                    .map(|s| s.clone())
                     .unwrap_or_else(|| Arc::new(DataSchema::new(vec![])));
                 let procedure = call.procedure.object().clone();
                 let session = self.session.clone();
                 let args = call.args.clone();
-                (Box::new(ProcedureCallBuilder::new(procedure, session, args).into_executor()), plan_schema)
+                (
+                    Box::new(ProcedureCallBuilder::new(procedure, session, args).into_executor()),
+                    plan_schema,
+                )
             }
             // We don't need an independent executor for PhysicalOneRow. Returning a chunk with a
             // single row is enough.
@@ -328,26 +343,43 @@ impl ExecutorBuilder {
                         SortSpec::new(key, s.ordering, s.null_ordering)
                     })
                     .collect();
-                (Box::new(child_executor.sort(specs, DEFAULT_CHUNK_SIZE)), child_actual_schema)
+                (
+                    Box::new(child_executor.sort(specs, DEFAULT_CHUNK_SIZE)),
+                    child_actual_schema,
+                )
             }
             PlanNode::PhysicalLimit(limit) => {
                 assert_eq!(children.len(), 1);
                 let (child_executor, child_actual_schema) = self.build_executor(&children[0]);
-                (Box::new(child_executor.limit(limit.limit)), child_actual_schema)
+                (
+                    Box::new(child_executor.limit(limit.limit)),
+                    child_actual_schema,
+                )
             }
             PlanNode::PhysicalOffset(offset) => {
                 assert_eq!(children.len(), 1);
                 let (child_executor, child_actual_schema) = self.build_executor(&children[0]);
-                (Box::new(child_executor.offset(offset.offset)), child_actual_schema)
+                (
+                    Box::new(child_executor.offset(offset.offset)),
+                    child_actual_schema,
+                )
             }
             PlanNode::PhysicalVectorIndexScan(vector_scan) => {
                 assert!(children.is_empty());
-                let plan_schema = physical_plan.schema().expect("VectorIndexScan should have a schema").clone();
-                (VectorIndexScanBuilder::new(self.session.clone(), vector_scan.clone())
-                    .into_executor(), plan_schema)
+                let plan_schema = physical_plan
+                    .schema()
+                    .expect("VectorIndexScan should have a schema")
+                    .clone();
+                (
+                    VectorIndexScanBuilder::new(self.session.clone(), vector_scan.clone())
+                        .into_executor(),
+                    plan_schema,
+                )
             }
             PlanNode::PhysicalExplain(explain) => {
-                let plan_schema = physical_plan.schema().map(|s| s.clone())
+                let plan_schema = physical_plan
+                    .schema()
+                    .map(|s| s.clone())
                     .unwrap_or_else(|| Arc::new(DataSchema::new(vec![])));
                 let explain_str = explain.explain(0).unwrap_or_default();
                 let lines: Vec<&str> = explain_str.lines().collect();
@@ -358,17 +390,27 @@ impl ExecutorBuilder {
             }
             PlanNode::PhysicalCreateVectorIndex(create_index) => {
                 assert!(children.is_empty());
-                let plan_schema = physical_plan.schema().map(|s| s.clone())
+                let plan_schema = physical_plan
+                    .schema()
+                    .map(|s| s.clone())
                     .unwrap_or_else(|| Arc::new(DataSchema::new(vec![])));
-                (CreateVectorIndexBuilder::new(self.session.clone(), create_index.clone())
-                    .into_executor(), plan_schema)
+                (
+                    CreateVectorIndexBuilder::new(self.session.clone(), create_index.clone())
+                        .into_executor(),
+                    plan_schema,
+                )
             }
             PlanNode::PhysicalDropVectorIndex(drop_index) => {
                 assert!(children.is_empty());
-                let plan_schema = physical_plan.schema().map(|s| s.clone())
+                let plan_schema = physical_plan
+                    .schema()
+                    .map(|s| s.clone())
                     .unwrap_or_else(|| Arc::new(DataSchema::new(vec![])));
-                (DropVectorIndexBuilder::new(self.session.clone(), drop_index.clone())
-                    .into_executor(), plan_schema)
+                (
+                    DropVectorIndexBuilder::new(self.session.clone(), drop_index.clone())
+                        .into_executor(),
+                    plan_schema,
+                )
             }
             _ => unreachable!(),
         }

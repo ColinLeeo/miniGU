@@ -1,9 +1,9 @@
 //! Lazy update log for GCard statistics.
 //!
 //! When edges/vertices are inserted or deleted, callers append [`UpdateEntry`] records here
-//! instead of immediately recomputing multi-hop degree statistics.  [`GCardUpdateLog::compact_and_apply`]
-//! later expands all pending entries via graph traversal, applies the net deltas to
-//! [`Statistic`], removes any deleted vertices, and clears the log.
+//! instead of immediately recomputing multi-hop degree statistics.
+//! [`GCardUpdateLog::compact_and_apply`] later expands all pending entries via graph traversal,
+//! applies the net deltas to [`Statistic`], removes any deleted vertices, and clears the log.
 //!
 //! Stored type-erased inside [`GraphContainer`] (same pattern as `Statistic` /
 //! `DegreeSeqGraphCompressed`).  Consumers in `minigu-core` downcast via
@@ -97,18 +97,26 @@ impl GCardUpdateLog {
         let mut label_to_exts: HashMap<String, Vec<(String, String, LabelId, bool)>> =
             HashMap::new();
         for (edge_name, &(src_id, dst_id, edge_id)) in edge_schema {
-            let Some(src_name) = label_id_to_name.get(&src_id) else { continue };
-            let Some(dst_name) = label_id_to_name.get(&dst_id) else { continue };
+            let Some(src_name) = label_id_to_name.get(&src_id) else {
+                continue;
+            };
+            let Some(dst_name) = label_id_to_name.get(&dst_id) else {
+                continue;
+            };
             // From dst's perspective: src is an INCOMING neighbor.
-            label_to_exts
-                .entry(dst_name.clone())
-                .or_default()
-                .push((edge_name.clone(), src_name.clone(), edge_id, false));
+            label_to_exts.entry(dst_name.clone()).or_default().push((
+                edge_name.clone(),
+                src_name.clone(),
+                edge_id,
+                false,
+            ));
             // From src's perspective: dst is an OUTGOING neighbor.
-            label_to_exts
-                .entry(src_name.clone())
-                .or_default()
-                .push((edge_name.clone(), dst_name.clone(), edge_id, true));
+            label_to_exts.entry(src_name.clone()).or_default().push((
+                edge_name.clone(),
+                dst_name.clone(),
+                edge_id,
+                true,
+            ));
         }
 
         // ── Phase 1: expand → accumulate ─────────────────────────────────
