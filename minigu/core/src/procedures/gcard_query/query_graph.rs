@@ -6,7 +6,6 @@ use minigu_catalog::provider::{GraphTypeProvider, PropertiesProvider};
 use minigu_common::types::{EdgeId, LabelId, VertexId};
 use minigu_common::value::ScalarValue;
 use minigu_context::graph::GraphContainer;
-use minigu_storage::common::iterators::AdjacencyIteratorTrait;
 use minigu_storage::common::model::edge::Edge;
 use minigu_storage::common::model::vertex::Vertex;
 use minigu_storage::tp::MemoryGraph;
@@ -191,37 +190,73 @@ impl QueryGraph {
             }
             return vec![];
         }
-        let mut queue = std::collections::VecDeque::new();
-        queue.push_back((start, HashSet::new(), HashSet::from([start])));
         let mut result = Vec::new();
-        while let Some((current, path_edges, visited)) = queue.pop_front() {
-            if path_edges.len() == k {
-                if current == end {
-                    result.push(path_edges);
+        let mut path_edges = HashSet::new();
+        let mut visited = HashSet::from([start]);
+        // Stack of (vertex, neighbor_iterator_index); backtrack by popping.
+        let mut stack: Vec<(VertexId, Vec<(VertexId, EdgeId)>, usize)> = Vec::new();
+
+        let neighbors = self.get_neighbor_edge_pairs(start);
+        stack.push((start, neighbors, 0));
+
+        while let Some(frame) = stack.last_mut() {
+            let (_current, ref nbrs, ref mut idx) = *frame;
+            if *idx >= nbrs.len() {
+                // Backtrack
+                let (v, _, _) = stack.pop().unwrap();
+                if let Some(parent) = stack.last() {
+                    // Remove the edge that led to v
+                    let (_, ref parent_nbrs, parent_idx) = *parent;
+                    if parent_idx > 0 {
+                        let (_, edge_id) = parent_nbrs[parent_idx - 1];
+                        path_edges.remove(&edge_id);
+                    }
                 }
+                visited.remove(&v);
                 continue;
             }
-            let neighbors = self.get_neighbors(current);
-            for neighbor in neighbors {
-                if visited.contains(&neighbor) {
-                    continue;
+            let (neighbor, edge_id) = nbrs[*idx];
+            *idx += 1;
+
+            if visited.contains(&neighbor) {
+                continue;
+            }
+
+            path_edges.insert(edge_id);
+            visited.insert(neighbor);
+
+            if path_edges.len() == k {
+                if neighbor == end {
+                    result.push(path_edges.clone());
                 }
-                let outgoing = self.get_outgoing_edges(current);
-                let incoming = self.get_incoming_edges(current);
-                let edge_opt = outgoing
-                    .iter()
-                    .find(|e| e.dst_vertex_id == neighbor)
-                    .or_else(|| incoming.iter().find(|e| e.src_vertex_id == neighbor));
-                if let Some(edge) = edge_opt {
-                    let mut new_path_edges = path_edges.clone();
-                    new_path_edges.insert(edge.id);
-                    let mut new_visited = visited.clone();
-                    new_visited.insert(neighbor);
-                    queue.push_back((neighbor, new_path_edges, new_visited));
-                }
+                path_edges.remove(&edge_id);
+                visited.remove(&neighbor);
+            } else {
+                let next_nbrs = self.get_neighbor_edge_pairs(neighbor);
+                stack.push((neighbor, next_nbrs, 0));
             }
         }
         result
+    }
+
+    /// Get all (neighbor_vertex, edge_id) pairs for a vertex.
+    fn get_neighbor_edge_pairs(&self, v: VertexId) -> Vec<(VertexId, EdgeId)> {
+        let mut pairs = Vec::new();
+        if let Some(outgoing_ids) = self.inner.outgoing_edges.get(&v) {
+            for &edge_id in outgoing_ids {
+                if let Some(edge) = self.inner.edges.get(&edge_id) {
+                    pairs.push((edge.dst_vertex_id, edge_id));
+                }
+            }
+        }
+        if let Some(incoming_ids) = self.inner.incoming_edges.get(&v) {
+            for &edge_id in incoming_ids {
+                if let Some(edge) = self.inner.edges.get(&edge_id) {
+                    pairs.push((edge.src_vertex_id, edge_id));
+                }
+            }
+        }
+        pairs
     }
 
     pub fn build_best_spanning_tree(&self, scores: &HashMap<EdgeId, u32>) -> Option<CandidateTree> {
@@ -321,27 +356,18 @@ impl QueryGraph {
         }
 
         let mut result = Vec::new();
-        let mut seen_trees: Vec<HashSet<EdgeId>> = Vec::new();
+        let mut seen_trees: HashSet<Vec<EdgeId>> = HashSet::new();
         let mut candidates = BinaryHeap::new();
 
         let first_tree = first_tree.unwrap();
-        let first_edge_set: HashSet<EdgeId> = first_tree.edge_ids.clone();
-
-        seen_trees.push(first_edge_set.clone());
+        let mut sorted_key: Vec<EdgeId> = first_tree.edge_ids.iter().copied().collect();
+        sorted_key.sort();
+        seen_trees.insert(sorted_key);
         candidates.push(first_tree);
 
         while result.len() < k && !candidates.is_empty() {
             let current = candidates.pop().unwrap();
             let current_edge_set = current.edge_ids.clone();
-
-            let already_added = result.iter().any(|(g, _): &(QueryGraph, u32)| {
-                let g_edges: HashSet<EdgeId> = g.inner.edges.keys().copied().collect();
-                g_edges == current_edge_set
-            });
-
-            if already_added {
-                continue;
-            }
 
             result.push((
                 self.build_subgraph_from_edges(&current_edge_set),
@@ -385,7 +411,10 @@ impl QueryGraph {
                             new_edge_set.remove(&edge_to_remove);
                             new_edge_set.insert(new_edge_id);
 
-                            if seen_trees.iter().any(|s| s == &new_edge_set) {
+                            let mut sorted_key: Vec<EdgeId> =
+                                new_edge_set.iter().copied().collect();
+                            sorted_key.sort();
+                            if seen_trees.contains(&sorted_key) {
                                 continue;
                             }
 
@@ -401,7 +430,7 @@ impl QueryGraph {
                                         total_score,
                                     };
 
-                                seen_trees.push(new_edge_set.clone());
+                                seen_trees.insert(sorted_key);
                                 candidates.push(candidate);
                             }
                         }
@@ -409,7 +438,9 @@ impl QueryGraph {
                         let mut new_edge_set = current.edge_ids.clone();
                         new_edge_set.insert(new_edge_id);
 
-                        if seen_trees.contains(&new_edge_set) {
+                        let mut sorted_key: Vec<EdgeId> = new_edge_set.iter().copied().collect();
+                        sorted_key.sort();
+                        if seen_trees.contains(&sorted_key) {
                             continue;
                         }
 
@@ -424,7 +455,7 @@ impl QueryGraph {
                                 total_score,
                             };
 
-                            seen_trees.push(new_edge_set.clone());
+                            seen_trees.insert(sorted_key);
                             candidates.push(candidate);
                         }
                     }
@@ -449,6 +480,25 @@ impl QueryGraph {
         // Cache sampled vertex IDs by label to avoid repeated full-table scans
         let vertex_sample_cache: Arc<DashMap<LabelId, Vec<VertexId>>> = Arc::new(DashMap::new());
 
+        // Pre-extract mem + txn once for all wander join walks (Snapshot: no read-set overhead)
+        let shared_txn = graph_container
+            .map(
+                |gc| -> GCardResult<(Arc<MemoryGraph>, Arc<MemTransaction>)> {
+                    let mem = match gc.graph_storage() {
+                        minigu_context::graph::GraphStorage::Memory(m) => Arc::clone(m),
+                    };
+                    let txn = GraphTxnManager::begin_transaction(
+                        mem.txn_manager(),
+                        IsolationLevel::Snapshot,
+                    )
+                    .map_err(|e| {
+                        GCardError::InvalidState(format!("Failed to begin transaction: {:?}", e))
+                    })?;
+                    Ok((mem, txn))
+                },
+            )
+            .transpose()?;
+
         if !self.has_cycle() {
             let abstract_graph = self.build_abstract_graph_from_query_graph(
                 self,
@@ -459,6 +509,7 @@ impl QueryGraph {
                 predicate_apply_type,
                 &selectivity_cache,
                 &vertex_sample_cache,
+                &shared_txn,
             )?;
             return Ok(vec![(abstract_graph, 0)]);
         }
@@ -480,10 +531,18 @@ impl QueryGraph {
                     predicate_apply_type,
                     &selectivity_cache,
                     &vertex_sample_cache,
+                    &shared_txn,
                 )
                 .map(|ag| (ag, *tree_score))
             })
             .collect();
+
+        // Commit the shared transaction after all walks are done
+        if let Some((_, txn)) = shared_txn {
+            txn.commit().map_err(|e| {
+                GCardError::InvalidState(format!("Failed to commit transaction: {:?}", e))
+            })?;
+        }
 
         let mut abstract_graphs = Vec::new();
         for r in results {
@@ -516,6 +575,7 @@ impl QueryGraph {
         predicate_apply_type: &PredicateApplyType,
         selectivity_cache: &Arc<DashMap<String, f64>>,
         vertex_sample_cache: &Arc<DashMap<LabelId, Vec<VertexId>>>,
+        shared_txn: &Option<(Arc<MemoryGraph>, Arc<MemTransaction>)>,
     ) -> GCardResult<AbstractGraph> {
         let pivot_nodes = query_graph.find_pivot_nodes();
 
@@ -535,6 +595,7 @@ impl QueryGraph {
                     predicate_apply_type,
                     selectivity_cache,
                     vertex_sample_cache,
+                    shared_txn,
                 )?;
 
                 let src_vertex = self.get_vertex(abstract_edge.src).unwrap();
@@ -562,6 +623,7 @@ impl QueryGraph {
         predicate_apply_type: &PredicateApplyType,
         selectivity_cache: &Arc<DashMap<String, f64>>,
         vertex_sample_cache: &Arc<DashMap<LabelId, Vec<VertexId>>>,
+        shared_txn: &Option<(Arc<MemoryGraph>, Arc<MemTransaction>)>,
     ) -> GCardResult<()> {
         let mut node_labels = Vec::new();
         for &vertex_id in &abstract_edge.path_vertices {
@@ -622,10 +684,10 @@ impl QueryGraph {
             }
         }
         abstract_edge.path_str = output;
-        if let Some(graph) = graph_container {
+        if let Some((mem, txn)) = shared_txn {
+            let graph_type = graph_container.unwrap().graph_type();
             let selectivity = if !abstract_edge.predicates.is_empty()
-                && (matches!(predicate_apply_type, PredicateApplyType::INNER)
-                    || matches!(predicate_apply_type, PredicateApplyType::OUTER))
+                && matches!(predicate_apply_type, PredicateApplyType::INNER)
             {
                 // Build cache key from path pattern + predicates
                 let cache_key =
@@ -633,12 +695,19 @@ impl QueryGraph {
                 if let Some(cached) = selectivity_cache.get(&cache_key) {
                     *cached
                 } else {
+                    let t0 = std::time::Instant::now();
                     let sel = self.compute_selectivity_with_predicates(
-                        graph,
+                        mem,
+                        txn,
+                        graph_type.as_ref(),
                         abstract_edge,
                         sample_size,
                         vertex_sample_cache,
                     )?;
+                    crate::procedures::gcard_query::SAMPLING_NANOS.fetch_add(
+                        t0.elapsed().as_nanos() as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                     selectivity_cache.insert(cache_key, sel);
                     sel
                 }
@@ -690,7 +759,9 @@ impl QueryGraph {
 
     fn compute_selectivity_with_predicates(
         &self,
-        graph_container: &GraphContainer,
+        mem: &Arc<MemoryGraph>,
+        txn: &Arc<MemTransaction>,
+        graph_type: &dyn GraphTypeProvider,
         abstract_edge: &AbstractEdge,
         sample_size: usize,
         vertex_sample_cache: &Arc<DashMap<LabelId, Vec<VertexId>>>,
@@ -707,8 +778,7 @@ impl QueryGraph {
             .label
             .clone();
 
-        let graph_type = graph_container.graph_type();
-        let src_label_id = GraphTypeProvider::get_label_id(graph_type.as_ref(), &src_label)
+        let src_label_id = GraphTypeProvider::get_label_id(graph_type, &src_label)
             .map_err(|e| {
                 GCardError::InvalidData(format!(
                     "Failed to get label_id for {}: {:?}",
@@ -720,54 +790,36 @@ impl QueryGraph {
             })?;
 
         // Pre-compile the path query: resolve all label IDs and property indices once
-        let compiled = CompiledPathQuery::compile(&path_query, graph_type.as_ref())?;
+        let compiled = CompiledPathQuery::compile(&path_query, graph_type)?;
 
-        let mem = match graph_container.graph_storage() {
-            minigu_context::graph::GraphStorage::Memory(m) => Arc::clone(m),
-        };
-        let txn =
-            GraphTxnManager::begin_transaction(mem.txn_manager(), IsolationLevel::Serializable)
-                .map_err(|e| {
-                    GCardError::InvalidState(format!("Failed to begin transaction: {:?}", e))
-                })?;
-
-        // Use cached sampled vertices for this label, or build cache on first access
+        // Use cached sampled vertices for this label, or build cache on first access.
+        // Uses raw_vertex_ids_by_label (per-label index, no MVCC) instead of full-table scan.
         let sampled_starts = if let Some(cached) = vertex_sample_cache.get(&src_label_id) {
             cached.clone()
         } else {
-            use rand::{Rng, thread_rng};
-            let mut rng = thread_rng();
-            let mut samples = Vec::new();
-            let mut count = 0usize;
-
-            for (vid, label_id) in txn.iter_vertex_ids() {
-                if label_id != src_label_id {
-                    continue;
-                }
-                count += 1;
-                if samples.len() < sample_size {
-                    samples.push(vid);
-                } else {
-                    let j = rng.gen_range(0..count);
-                    if j < sample_size {
-                        samples[j] = vid;
-                    }
-                }
+            use rand::seq::SliceRandom;
+            let mut all_vids = txn.raw_vertex_ids_by_label(src_label_id);
+            let mut rng = rand::thread_rng();
+            if all_vids.len() > sample_size {
+                all_vids.partial_shuffle(&mut rng, sample_size);
+                all_vids.truncate(sample_size);
             }
-            vertex_sample_cache.insert(src_label_id, samples.clone());
-            samples
+            vertex_sample_cache.insert(src_label_id, all_vids.clone());
+            all_vids
         };
 
         if sampled_starts.is_empty() {
             return Ok(0.0);
         }
 
-        use rand::{Rng, thread_rng};
-        let mut rng = thread_rng();
+        const PILOT_WALKS: usize = 5;
+        const MAX_WALKS: usize = 50;
+        const CV_THRESHOLD: f64 = 0.3;
+        const BATCH_SIZE: usize = 512;
 
+        // Convergence parameters.
         let struct_count_min: usize = 300;
         let struct_count_max: usize = 4_000;
-
         let rel_eps: f64 = 0.10;
         let z_95: f64 = 1.96;
         let eps0: f64 = 1e-12;
@@ -775,119 +827,139 @@ impl QueryGraph {
         let mut struct_success_sample_count: usize = 0;
         let mut sum_struct_weight: f64 = 0.0;
         let mut sum_pred_weight: f64 = 0.0;
-
-        let mut sum_struct_weight_seq: f64 = 0.0;
-        let mut sum_pred_weight_seq: f64 = 0.0;
+        let mut sum_struct_weight_sq: f64 = 0.0;
+        let mut sum_pred_weight_sq: f64 = 0.0;
         let mut sum_cross_weight: f64 = 0.0;
+        let mut converged = false;
 
-        const PILOT_WALKS: usize = 5;
-        const MAX_WALKS: usize = 50;
-        const CV_THRESHOLD: f64 = 0.3;
+        // Process in batches: parallel walks per batch, then check convergence.
+        for batch in sampled_starts.chunks(BATCH_SIZE) {
+            let batch_results: Vec<Option<(f64, f64)>> = batch
+                .par_iter()
+                .map(|&start_vid| {
+                    use rand::{Rng, thread_rng};
+                    let mut rng = thread_rng();
+                    let mut nbr_buf: Vec<VertexId> = Vec::new();
+                    let mut nbr_eid_buf: Vec<(VertexId, EdgeId)> = Vec::new();
 
-        for start_vid in sampled_starts {
-            let mut walk_struct: Vec<f64> = Vec::with_capacity(PILOT_WALKS);
-            let mut walk_pred: Vec<f64> = Vec::with_capacity(PILOT_WALKS);
+                    let mut walk_struct: Vec<f64> = Vec::with_capacity(PILOT_WALKS);
+                    let mut walk_pred: Vec<f64> = Vec::with_capacity(PILOT_WALKS);
 
-            for _ in 0..PILOT_WALKS {
-                let (sw, pw) =
-                    self.execute_compiled_walk(&mem, &txn, &compiled, start_vid, &mut rng)?;
-                walk_struct.push(sw);
-                walk_pred.push(pw);
-            }
+                    for _ in 0..PILOT_WALKS {
+                        let (sw, pw) = self
+                            .execute_compiled_walk(
+                                mem,
+                                txn,
+                                &compiled,
+                                start_vid,
+                                &mut rng,
+                                &mut nbr_buf,
+                                &mut nbr_eid_buf,
+                            )
+                            .ok()?;
+                        walk_struct.push(sw);
+                        walk_pred.push(pw);
+                    }
 
-            let pilot_mean: f64 = walk_struct.iter().sum::<f64>() / walk_struct.len() as f64;
-            let need_more = if pilot_mean > 0.0 {
-                let variance: f64 = walk_struct
-                    .iter()
-                    .map(|&w| (w - pilot_mean) * (w - pilot_mean))
-                    .sum::<f64>()
-                    / (walk_struct.len() as f64 - 1.0).max(1.0);
-                let cv = variance.sqrt() / pilot_mean;
-                cv > CV_THRESHOLD
-            } else {
-                false
-            };
+                    let pilot_mean: f64 =
+                        walk_struct.iter().sum::<f64>() / walk_struct.len() as f64;
+                    let need_more = if pilot_mean > 0.0 {
+                        let variance: f64 = walk_struct
+                            .iter()
+                            .map(|&w| (w - pilot_mean) * (w - pilot_mean))
+                            .sum::<f64>()
+                            / (walk_struct.len() as f64 - 1.0).max(1.0);
+                        let cv = variance.sqrt() / pilot_mean;
+                        cv > CV_THRESHOLD
+                    } else {
+                        false
+                    };
 
-            if need_more {
-                let extra = MAX_WALKS - PILOT_WALKS;
-                for _ in 0..extra {
-                    let (sw, pw) =
-                        self.execute_compiled_walk(&mem, &txn, &compiled, start_vid, &mut rng)?;
-                    walk_struct.push(sw);
-                    walk_pred.push(pw);
-                }
-            }
+                    if need_more {
+                        let extra = MAX_WALKS - PILOT_WALKS;
+                        for _ in 0..extra {
+                            let (sw, pw) = self
+                                .execute_compiled_walk(
+                                    mem,
+                                    txn,
+                                    &compiled,
+                                    start_vid,
+                                    &mut rng,
+                                    &mut nbr_buf,
+                                    &mut nbr_eid_buf,
+                                )
+                                .ok()?;
+                            walk_struct.push(sw);
+                            walk_pred.push(pw);
+                        }
+                    }
 
-            let total_walks = walk_struct.len() as f64;
-            let start_struct_sum: f64 = walk_struct.iter().sum();
-            let start_pred_sum: f64 = walk_pred.iter().sum();
+                    let total_walks = walk_struct.len() as f64;
+                    let struct_weight = walk_struct.iter().sum::<f64>() / total_walks;
+                    let pred_weight = walk_pred.iter().sum::<f64>() / total_walks;
 
-            if start_struct_sum <= 0.0 {
-                continue;
-            }
+                    if struct_weight > 0.0 {
+                        Some((struct_weight, pred_weight))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
 
-            let struct_weight = start_struct_sum / total_walks;
-            let pred_weight = start_pred_sum / total_walks;
+            // Accumulate batch results and check convergence.
+            for result in &batch_results {
+                let &Some((struct_weight, pred_weight)) = result else {
+                    continue;
+                };
 
-            if struct_weight > 0.0 {
                 struct_success_sample_count += 1;
                 sum_struct_weight += struct_weight;
                 sum_pred_weight += pred_weight;
-                sum_struct_weight_seq += struct_weight * struct_weight;
-                sum_pred_weight_seq += pred_weight * pred_weight;
+                sum_struct_weight_sq += struct_weight * struct_weight;
+                sum_pred_weight_sq += pred_weight * pred_weight;
                 sum_cross_weight += struct_weight * pred_weight;
 
                 if struct_success_sample_count >= struct_count_max {
+                    converged = true;
                     break;
                 }
+            }
 
-                if struct_success_sample_count < struct_count_min {
-                    continue;
-                }
-                if struct_success_sample_count % 100 == 0 {
-                    let k = struct_success_sample_count as f64;
-                    let mean_struct_weight: f64 = sum_struct_weight / k;
-                    let mean_pred_weight: f64 = sum_pred_weight / k;
-                    let selectivity_estimate: f64 = mean_pred_weight / mean_struct_weight;
-                    let denom: f64 = k - 1.0;
-                    if denom <= 0.0 {
-                        continue;
-                    }
-                    let var_pred_weight: f64 =
-                        (sum_pred_weight_seq - k * mean_pred_weight * mean_pred_weight) / denom;
-                    let var_struct_weight: f64 = (sum_struct_weight_seq
-                        - k * mean_struct_weight * mean_struct_weight)
-                        / denom;
+            if converged {
+                break;
+            }
 
-                    let cov_pred_struct: f64 =
-                        (sum_cross_weight - k * mean_pred_weight * mean_struct_weight) / denom;
+            // Check convergence after each batch (once we have enough samples).
+            if struct_success_sample_count >= struct_count_min {
+                let k = struct_success_sample_count as f64;
+                let mean_struct = sum_struct_weight / k;
+                let mean_pred = sum_pred_weight / k;
+                let denom = k - 1.0;
+                if denom > 0.0 && mean_struct.abs() > eps0 {
+                    let selectivity_est = mean_pred / mean_struct;
+                    let var_pred = (sum_pred_weight_sq - k * mean_pred * mean_pred) / denom;
+                    let var_struct = (sum_struct_weight_sq - k * mean_struct * mean_struct) / denom;
+                    let cov = (sum_cross_weight - k * mean_pred * mean_struct) / denom;
 
-                    let mu_x: f64 = mean_pred_weight;
-                    let mu_y: f64 = mean_struct_weight;
-                    let se_squared: f64 = (var_pred_weight / (mu_y * mu_y)
-                        + (mu_x * mu_x) * var_struct_weight / (mu_y.powi(4))
-                        - 2.0 * mu_x * cov_pred_struct / (mu_y.powi(3)))
+                    let mu_x = mean_pred;
+                    let mu_y = mean_struct;
+                    let se_sq = (var_pred / (mu_y * mu_y)
+                        + (mu_x * mu_x) * var_struct / (mu_y.powi(4))
+                        - 2.0 * mu_x * cov / (mu_y.powi(3)))
                         / k;
-                    if !se_squared.is_finite() || se_squared < 0.0 {
-                        continue;
-                    }
-                    let standard_error: f64 = se_squared.sqrt();
-                    let ci_half_width: f64 = z_95 * standard_error;
-                    let relative_half_width: f64 =
-                        ci_half_width / selectivity_estimate.abs().max(eps0);
-                    if relative_half_width <= rel_eps {
-                        break;
+                    if se_sq.is_finite() && se_sq >= 0.0 {
+                        let ci_half = z_95 * se_sq.sqrt();
+                        let rel_half = ci_half / selectivity_est.abs().max(eps0);
+                        if rel_half <= rel_eps {
+                            break;
+                        }
                     }
                 }
             }
         }
 
-        txn.commit().map_err(|e| {
-            GCardError::InvalidState(format!("Failed to commit transaction: {:?}", e))
-        })?;
-
         let selectivity = if sum_struct_weight > 0.0 {
-            sum_pred_weight as f64 / sum_struct_weight as f64
+            sum_pred_weight / sum_struct_weight
         } else {
             0.0
         };
@@ -971,6 +1043,7 @@ impl QueryGraph {
     /// - Uses `get_vertex_label_id` (no property clone) for label checks
     /// - Only calls `get_vertex` when predicates actually need evaluation
     /// - Reuses the caller's `rng` instead of creating one per walk
+    /// - Reuses caller-provided buffers to avoid per-step Vec allocation
     fn execute_compiled_walk(
         &self,
         mem: &Arc<MemoryGraph>,
@@ -978,6 +1051,8 @@ impl QueryGraph {
         compiled: &CompiledPathQuery,
         start_vertex: VertexId,
         rng: &mut impl rand::Rng,
+        nbr_buf: &mut Vec<VertexId>,
+        nbr_eid_buf: &mut Vec<(VertexId, EdgeId)>,
     ) -> GCardResult<(f64, f64)> {
         if compiled.steps.is_empty() {
             return Ok((1.0, 1.0));
@@ -990,34 +1065,35 @@ impl QueryGraph {
         for step in &compiled.steps {
             match step {
                 CompiledStep::Vertex {
-                    label_id,
+                    label_id: _,
                     predicates,
                 } => {
-                    // Lightweight label check — no property clone
-                    let actual_label = match mem.get_vertex_label_id(txn, current_vid) {
-                        Ok(lid) => lid,
-                        Err(_) => return Ok((0.0, 0.0)),
-                    };
-                    if actual_label != *label_id {
-                        return Ok((0.0, 0.0));
-                    }
+                    // Vertex label check is skipped: the start vertex is already
+                    // sampled by label, and intermediate vertices are reached via
+                    // typed edges whose endpoint labels are fixed by the schema.
 
                     // Only load full vertex if we have predicates to check
                     if pred_ok && !predicates.is_empty() {
-                        let vertex = match mem.get_vertex(txn, current_vid) {
-                            Ok(v) => v,
-                            Err(_) => return Ok((0.0, 0.0)),
-                        };
-                        for rp in predicates {
-                            if let Some(prop_value) = vertex.properties().get(rp.prop_index) {
-                                if !self.compare_values(prop_value, &rp.op, &rp.value)? {
-                                    pred_ok = false;
-                                    break;
+                        let check = mem.with_raw_vertex_props(current_vid, |props| {
+                            for rp in predicates {
+                                match props.get(rp.prop_index) {
+                                    Some(v) => {
+                                        if !self.compare_values(v, &rp.op, &rp.value)? {
+                                            return Ok(false);
+                                        }
+                                    }
+                                    None => return Ok(false),
                                 }
-                            } else {
-                                pred_ok = false;
-                                break;
                             }
+                            Ok(true)
+                        });
+                        match check {
+                            None => return Ok((0.0, 0.0)),
+                            Some(Ok(false)) => {
+                                pred_ok = false;
+                            }
+                            Some(Ok(true)) => {}
+                            Some(Err(e)) => return Err(e),
                         }
                     }
                 }
@@ -1027,57 +1103,62 @@ impl QueryGraph {
                     predicates,
                 } => {
                     let edge_label_id = *label_id;
+                    let outgoing = matches!(direction, EdgeDirection::Outgoing);
 
-                    // Reservoir sampling: pick a random matching neighbor in one pass
-                    // without collecting all neighbors into a Vec.
-                    let mut chosen_neighbor_id: VertexId = 0;
-                    let mut chosen_eid: EdgeId = 0;
-                    let mut degree: usize = 0;
+                    let has_edge_predicates = pred_ok && !predicates.is_empty();
 
-                    let adj_iter = match direction {
-                        EdgeDirection::Outgoing => txn.iter_adjacency_outgoing(current_vid),
-                        EdgeDirection::Incoming => txn.iter_adjacency_incoming(current_vid),
-                    };
-                    let adj_iter = AdjacencyIteratorTrait::filter(adj_iter, move |neighbor| {
-                        neighbor.label_id() == edge_label_id
-                    });
-
-                    for neighbor_result in adj_iter {
-                        if let Ok(n) = neighbor_result {
-                            degree += 1;
-                            // Reservoir sampling: keep item with probability 1/degree
-                            if degree == 1 || rng.gen_range(0..degree) == 0 {
-                                chosen_neighbor_id = n.neighbor_id();
-                                chosen_eid = n.eid();
-                            }
+                    if has_edge_predicates {
+                        nbr_eid_buf.clear();
+                        txn.raw_neighbors_with_eid_by_edge_into(
+                            current_vid,
+                            edge_label_id,
+                            outgoing,
+                            nbr_eid_buf,
+                        );
+                        let degree = nbr_eid_buf.len();
+                        if degree == 0 {
+                            return Ok((0.0, 0.0));
                         }
-                    }
+                        let idx = rng.gen_range(0..degree);
+                        let (chosen_neighbor_id, chosen_eid) = nbr_eid_buf[idx];
+                        weight *= degree as f64;
+                        current_vid = chosen_neighbor_id;
 
-                    if degree == 0 {
-                        return Ok((0.0, 0.0)); // dead end
-                    }
-
-                    weight *= degree as f64;
-                    current_vid = chosen_neighbor_id;
-
-                    // Check edge predicates on the chosen edge
-                    if pred_ok && !predicates.is_empty() {
-                        match mem.get_edge(txn, chosen_eid) {
-                            Ok(edge) => {
-                                for rp in predicates {
-                                    if let Some(prop_value) = edge.properties.get(rp.prop_index) {
-                                        if !self.compare_values(prop_value, &rp.op, &rp.value)? {
-                                            pred_ok = false;
-                                            break;
+                        let check = mem.with_raw_edge_props(chosen_eid, |props| {
+                            for rp in predicates {
+                                match props.get(rp.prop_index) {
+                                    Some(v) => {
+                                        if !self.compare_values(v, &rp.op, &rp.value)? {
+                                            return Ok(false);
                                         }
-                                    } else {
-                                        pred_ok = false;
-                                        break;
                                     }
+                                    None => return Ok(false),
                                 }
                             }
-                            Err(_) => pred_ok = false,
+                            Ok(true)
+                        });
+                        match check {
+                            None | Some(Ok(false)) => {
+                                pred_ok = false;
+                            }
+                            Some(Ok(true)) => {}
+                            Some(Err(e)) => return Err(e),
                         }
+                    } else {
+                        nbr_buf.clear();
+                        txn.raw_neighbors_by_edge_into(
+                            current_vid,
+                            edge_label_id,
+                            outgoing,
+                            nbr_buf,
+                        );
+                        let degree = nbr_buf.len();
+                        if degree == 0 {
+                            return Ok((0.0, 0.0));
+                        }
+                        let idx = rng.gen_range(0..degree);
+                        weight *= degree as f64;
+                        current_vid = nbr_buf[idx];
                     }
                 }
             }

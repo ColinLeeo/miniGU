@@ -96,6 +96,9 @@ pub struct GraphContainer {
     /// GCard: pending lazy update log – inner type is `Arc<Mutex<GCardUpdateLog>>`
     /// (type-erased; downcast in minigu core).
     gcard_update_log: RwLock<Option<Arc<dyn Any + Send + Sync>>>,
+    /// GCard: cached scanned hop data (type-erased ScannedHops; downcast in minigu core).
+    /// Persists across `create_catalog` calls so the graph only needs to be scanned once.
+    gcard_scanned_hops: RwLock<Option<Arc<dyn Any + Send + Sync>>>,
 }
 
 impl GraphContainer {
@@ -108,6 +111,7 @@ impl GraphContainer {
             degree_seq_graph_compressed: RwLock::new(None),
             statistic: RwLock::new(None),
             gcard_update_log: RwLock::new(None),
+            gcard_scanned_hops: RwLock::new(None),
         }
     }
 
@@ -229,6 +233,16 @@ impl GraphContainer {
         self.gcard_update_log.read().expect("RwLock read").clone()
     }
 
+    /// GCard: cache scanned hop data so subsequent `create_catalog` calls skip the scan phase.
+    pub fn set_gcard_scanned_hops(&self, v: Arc<dyn Any + Send + Sync>) {
+        *self.gcard_scanned_hops.write().expect("RwLock write") = Some(v);
+    }
+
+    /// GCard: get cached scanned hop data (downcast to `ScannedHops` in `minigu-core`).
+    pub fn gcard_scanned_hops(&self) -> Option<Arc<dyn Any + Send + Sync>> {
+        self.gcard_scanned_hops.read().expect("RwLock read").clone()
+    }
+
     /// GCard: clear all cached GCard data (statistic, compressed degree sequence, update log).
     ///
     /// Called at the start of `GCard_build` to ensure a clean slate before rebuilding,
@@ -240,6 +254,9 @@ impl GraphContainer {
             .expect("RwLock write") = None;
         *self.statistic.write().expect("RwLock write") = None;
         *self.gcard_update_log.write().expect("RwLock write") = None;
+        // Note: gcard_scanned_hops is NOT cleared here — it caches the graph's
+        // adjacency structure and can be reused across catalog rebuilds as long
+        // as the graph topology hasn't changed.
     }
 }
 

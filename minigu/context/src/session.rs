@@ -7,6 +7,7 @@ use minigu_catalog::provider::{CatalogProvider, SchemaProvider};
 
 use crate::database::DatabaseContext;
 use crate::error::{Error, SessionResult};
+use crate::graph::GraphContainer;
 
 #[derive(Clone, Debug)]
 pub struct SessionContext {
@@ -83,6 +84,20 @@ impl SessionContext {
             .ok_or_else(|| Error::GraphNotExists(graph_name.clone()))?;
         self.current_graph = Some(NamedGraphRef::new(Ident::new(graph_name), graph));
         Ok(())
+    }
+
+    pub fn get_graph_container(&self, graph_name: &str) -> SessionResult<Arc<GraphContainer>> {
+        let schema = self
+            .current_schema
+            .as_ref()
+            .ok_or(Error::CurrentSchemaNotSet)?;
+        let graph_provider = schema
+            .get_graph(graph_name)?
+            .ok_or_else(|| Error::GraphNotExists(graph_name.to_string()))?;
+
+        graph_provider
+            .downcast_arc::<GraphContainer>()
+            .map_err(|_| Error::Internal("graph container type mismatch".to_string()))
     }
 
     pub fn reset_current_graph(&mut self) {

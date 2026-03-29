@@ -131,4 +131,37 @@ impl MemTransaction {
             txn: self,
         }
     }
+
+    /// Returns a list of IDs of all visible vertices with the given label.
+    /// Much faster than `iter_vertex_ids()` when only vertices of one specific label are needed,
+    /// because it uses the per-label index instead of scanning the entire vertex map.
+    pub fn vertex_ids_by_label(&self, label_id: LabelId) -> Vec<VertexId> {
+        let graph = self.graph();
+        let Some(entry) = graph.vertices_by_label.get(&label_id) else {
+            return Vec::new();
+        };
+        entry
+            .read()
+            .unwrap()
+            .iter()
+            .copied()
+            .filter(|&vid| {
+                graph
+                    .vertices
+                    .get(&vid)
+                    .and_then(|v| v.get_visible_label_id(self))
+                    .is_some()
+            })
+            .collect()
+    }
+
+    /// Returns all vertex IDs for the given label without MVCC visibility checks.
+    /// Only safe in read-only analytical contexts where all data is fully committed.
+    pub fn raw_vertex_ids_by_label(&self, label_id: LabelId) -> Vec<VertexId> {
+        self.graph()
+            .vertices_by_label
+            .get(&label_id)
+            .map(|entry| entry.read().unwrap().clone())
+            .unwrap_or_default()
+    }
 }

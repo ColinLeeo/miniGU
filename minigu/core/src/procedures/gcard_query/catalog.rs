@@ -12,38 +12,58 @@ use crate::procedures::gcard_query::degreepiecewise::PiecewiseConstantFunction;
 use crate::procedures::gcard_query::error::{GCardError, GCardResult};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AltKey(pub Vec<String>);
+pub struct AltKey {
+    pub raw: Vec<String>,
+    normalized: Vec<String>,
+}
 
 impl fmt::Display for AltKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0.join(", "))
+        write!(f, "{}", self.raw.join(", "))
     }
 }
-impl AltKey {
-    pub fn sorted(&self) -> AltKey {
-        let mut v = self.0.clone();
-        v.sort();
-        AltKey(v)
-    }
 
-    fn normalized(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.0.iter().map(|s| s.to_lowercase()).collect();
-        v.sort();
-        v
+impl AltKey {
+    pub fn new(raw: Vec<String>) -> Self {
+        // Canonical form: de-interleave into (vs, es), compare forward vs reverse,
+        // pick the lexicographically smaller direction — same logic as PathPattern::new.
+        let lowered: Vec<String> = raw.iter().map(|s| s.to_lowercase()).collect();
+        let vs: Vec<&str> = lowered.iter().step_by(2).map(|s| s.as_str()).collect();
+        let es: Vec<&str> = lowered
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .map(|s| s.as_str())
+            .collect();
+
+        let rvs: Vec<&str> = vs.iter().rev().copied().collect();
+        let res: Vec<&str> = es.iter().rev().copied().collect();
+
+        let normalized = if (&vs, &es) <= (&rvs, &res) {
+            lowered
+        } else {
+            let mut out = Vec::with_capacity(raw.len());
+            for i in 0..rvs.len() {
+                out.push(rvs[i].to_string());
+                if i < res.len() {
+                    out.push(res[i].to_string());
+                }
+            }
+            out
+        };
+        Self { raw, normalized }
     }
 }
 
 impl PartialEq for AltKey {
     fn eq(&self, other: &Self) -> bool {
-        self.normalized() == other.normalized()
+        self.normalized == other.normalized
     }
 }
 
 impl Hash for AltKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        for s in self.normalized() {
-            s.hash(state);
-        }
+        self.normalized.hash(state);
     }
 }
 
@@ -57,7 +77,7 @@ pub fn make_alt_key(node_seq: &[String], edge_seq: &[String]) -> AltKey {
             out.push(edge_seq[i].clone());
         }
     }
-    AltKey(out)
+    AltKey::new(out)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,7 +109,7 @@ impl DegreeSeqGraphCompressed {
         path: &AltKey,
         target_node: &str,
     ) -> PiecewiseConstantFunction {
-        if let Some(endpoints) = self.edge_set_to_endpoints.get(&path.sorted()) {
+        if let Some(endpoints) = self.edge_set_to_endpoints.get(path) {
             let func = endpoints
                 .iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case(target_node))

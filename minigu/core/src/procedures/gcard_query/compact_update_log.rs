@@ -58,9 +58,7 @@ pub fn compact_gcard_update_log(container: &GraphContainer) -> anyhow::Result<()
         .collect();
 
     // ── Build edge schema: edge_name → (src_label_id, dst_label_id, edge_label_id) ──
-    let edges = crate::procedures::gcard_query::create_catalog::get_edges_from_catalog(
-        graph_type.as_ref(),
-    )?;
+    let edges = crate::procedures::gcard_query::utils::get_edges_from_catalog(graph_type.as_ref())?;
     let edge_schema: HashMap<String, (LabelId, LabelId, LabelId)> = edges
         .iter()
         .filter_map(|(edge_name, info)| {

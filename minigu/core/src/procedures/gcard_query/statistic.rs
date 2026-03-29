@@ -29,7 +29,7 @@ pub(crate) struct LabelStatistic {
 
 fn alt_key_serialized_size(alt_key: &AltKey) -> usize {
     let mut n = LEN_U64;
-    for s in &alt_key.0 {
+    for s in &alt_key.raw {
         n += LEN_U64 + s.as_bytes().len();
     }
     n

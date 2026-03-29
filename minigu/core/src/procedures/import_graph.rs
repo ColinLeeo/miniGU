@@ -248,6 +248,28 @@ pub fn import<P: AsRef<Path>>(
     Ok(())
 }
 
+/// Fast line count using byte-level newline scanning (avoids full CSV parsing overhead).
+fn count_csv_lines(path: &Path) -> usize {
+    use std::io::Read;
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return 0,
+    };
+    let mut reader = std::io::BufReader::with_capacity(64 * 1024, file);
+    let mut buf = [0u8; 64 * 1024];
+    let mut count = 0usize;
+    loop {
+        let bytes_read = match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        count += buf[..bytes_read].iter().filter(|&&b| b == b'\n').count();
+    }
+    // Subtract 1 for header row; guard against empty files
+    count.saturating_sub(1)
+}
+
 pub(crate) fn import_internal<P: AsRef<Path>>(
     manifest_path: P,
     db_path: Option<&Path>,
@@ -257,13 +279,6 @@ pub(crate) fn import_internal<P: AsRef<Path>>(
     let manifest = build_manifest(&manifest_path)?;
     let graph_type = get_graph_type_from_manifest(&manifest)?;
 
-    // Graph - use file-backed storage when db_path is set
-    let graph = if let Some(db_path) = db_path {
-        let data_path = crate::catalog_persistence::graph_data_path(db_path, graph_name);
-        MemoryGraph::with_db_file(&data_path)?
-    } else {
-        MemoryGraph::in_memory()
-    };
     let manifest_parent_dir = manifest_path.as_ref().parent().ok_or_else(|| {
         anyhow::anyhow!(
             "manifest path has no parent directory: {}",
@@ -272,12 +287,40 @@ pub(crate) fn import_internal<P: AsRef<Path>>(
     })?;
 
     // ========================================================================
+    // Phase 0: Estimate record counts for capacity pre-allocation
+    // ========================================================================
+    let (vertex_count, edge_count) = {
+        let vc: usize = manifest
+            .vertices
+            .par_iter()
+            .map(|vs| count_csv_lines(&manifest_parent_dir.join(&vs.file.path)))
+            .sum();
+        let ec: usize = manifest
+            .edges
+            .par_iter()
+            .map(|es| count_csv_lines(&manifest_parent_dir.join(&es.file.path)))
+            .sum();
+        (vc, ec)
+    };
+    eprintln!(
+        "Import: estimated {} vertices, {} edges. Pre-allocating storage...",
+        vertex_count, edge_count
+    );
+
+    // Graph - use file-backed storage when db_path is set, with capacity hints
+    let graph = if let Some(db_path) = db_path {
+        let data_path = crate::catalog_persistence::graph_data_path(db_path, graph_name);
+        MemoryGraph::with_db_file(&data_path)?
+    } else {
+        MemoryGraph::in_memory_with_capacity(vertex_count, edge_count)
+    };
+
+    // ========================================================================
     // Phase 1: Parse vertex CSV files in parallel, insert directly (no buffering)
     // ========================================================================
-    // Use AtomicU64 for vid assignment and DashMap for vid_mapping so multiple
-    // files can be parsed and inserted concurrently.
     let vid_counter = AtomicU64::new(1);
-    let vid_mapping: ConcurrentMap<(LabelId, VertexId), VertexId> = ConcurrentMap::new();
+    let vid_mapping: ConcurrentMap<(LabelId, VertexId), VertexId> =
+        ConcurrentMap::with_capacity(vertex_count);
     manifest
         .vertices
         .par_iter()
@@ -346,9 +389,12 @@ pub(crate) fn import_internal<P: AsRef<Path>>(
     // ========================================================================
     // Phase 2: Parse edge CSV files in parallel, insert directly (no buffering)
     // ========================================================================
-    // DashMap supports concurrent inserts; use AtomicU64 for eid assignment.
     let eid_counter = AtomicU64::new(1);
-    manifest
+    // Scope vid_mapping so it is dropped immediately after edge import,
+    // freeing ~48+ bytes per vertex of DashMap overhead before checkpoint.
+    {
+        let vid_mapping = &vid_mapping;
+        manifest
         .edges
         .par_iter()
         .try_for_each(|edge_spec| -> Result<()> {
@@ -467,6 +513,8 @@ pub(crate) fn import_internal<P: AsRef<Path>>(
             }
             Ok(())
         })?;
+    } // vid_mapping dropped here, freeing mapping memory before checkpoint
+    drop(vid_mapping);
 
     // Persist by writing a snapshot directly (bypasses WAL entirely).
     // No transaction was used, so no WAL/undo/redo overhead.
@@ -477,7 +525,9 @@ pub(crate) fn import_internal<P: AsRef<Path>>(
     Ok((graph, graph_type))
 }
 
-fn get_graph_type_from_manifest(manifest: &Manifest) -> Result<Arc<MemoryGraphTypeCatalog>> {
+pub(crate) fn get_graph_type_from_manifest(
+    manifest: &Manifest,
+) -> Result<Arc<MemoryGraphTypeCatalog>> {
     let mut graph_type = MemoryGraphTypeCatalog::new();
     let mut label_vertex_type = HashMap::new();
 

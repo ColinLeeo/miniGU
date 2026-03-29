@@ -23,6 +23,7 @@ minigu-transaction = { workspace = true }
 ordered-float = { workspace = true }
 parking_lot = { workspace = true }
 postcard = { workspace = true, features = ["alloc"] }
+rayon = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 vector = { workspace = true }

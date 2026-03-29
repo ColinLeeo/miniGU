@@ -509,77 +509,8 @@ pub fn pointwise_function_mult_refs(
 pub fn pointwise_function_mult(
     functions: &[PiecewiseConstantFunction],
 ) -> PiecewiseConstantFunction {
-    if functions.is_empty() {
-        return PiecewiseConstantFunction::empty();
-    }
-    if functions.len() == 1 {
-        return functions[0].copy();
-    }
-
-    let mut indices = vec![0usize; functions.len()];
-    let mut function_has_space: Vec<bool> = functions
-        .iter()
-        .map(|f| !f.right_interval_edges.is_empty())
-        .collect();
-
-    let mut left = 0.0;
-    let mut cur_cumulative_rows = 0.0;
-    let mut right_edges = Vec::new();
-    let mut constants = Vec::new();
-    let mut cumulative_rows = Vec::new();
-
-    while function_has_space.iter().all(|&has_space| has_space) {
-        let mut min_right = f64::INFINITY;
-        for (i, func) in functions.iter().enumerate() {
-            if function_has_space[i] {
-                let current_edge = func.right_interval_edges[indices[i]];
-                min_right = min_right.min(current_edge);
-            }
-        }
-
-        if min_right == f64::INFINITY {
-            break;
-        }
-
-        let right = min_right;
-
-        let mut constant = 1.0;
-        for (i, func) in functions.iter().enumerate() {
-            if function_has_space[i] {
-                constant *= func.constants[indices[i]];
-            }
-        }
-
-        if constant == 0.0 {
-            constant = 0.0001;
-        }
-
-        cur_cumulative_rows += (right - left) * constant;
-        right_edges.push(right);
-        constants.push(constant);
-        cumulative_rows.push(cur_cumulative_rows);
-
-        for (i, func) in functions.iter().enumerate() {
-            if function_has_space[i] && func.right_interval_edges[indices[i]] <= right {
-                indices[i] += 1;
-            }
-        }
-
-        for (i, func) in functions.iter().enumerate() {
-            function_has_space[i] = indices[i] < func.right_interval_edges.len();
-        }
-
-        left = right;
-    }
-
-    let mut func = PiecewiseConstantFunction {
-        constants,
-        right_interval_edges: right_edges,
-        cumulative_rows,
-    };
-
-    func.compress_func(None);
-    func
+    let refs: Vec<&PiecewiseConstantFunction> = functions.iter().collect();
+    pointwise_function_mult_refs(&refs)
 }
 
 pub fn pointwise_function_min(

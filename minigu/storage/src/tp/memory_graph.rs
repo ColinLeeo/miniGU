@@ -18,6 +18,7 @@ use super::vector_index::filter::create_filter_mask;
 use super::vector_index::in_mem_diskann::create_vector_index_config;
 use super::vector_index::{InMemANNAdapter, VectorIndex};
 use crate::common::model::edge::{Edge, Neighbor};
+use crate::common::model::properties::PropertyRecord;
 use crate::common::model::vertex::Vertex;
 use crate::common::wal::graph_wal::{Operation, RedoEntry};
 use crate::common::{DeltaOp, SetPropsOp};
@@ -411,6 +412,9 @@ pub struct MemoryGraph {
 
     // ---- Vector indices ----
     pub(super) vector_indices: DashMap<VectorIndexKey, Arc<RwLock<Box<dyn VectorIndex>>>>,
+
+    // ---- Per-label vertex index (label_id -> contiguous list of VertexIds) ----
+    pub(super) vertices_by_label: DashMap<LabelId, RwLock<Vec<VertexId>>>,
 }
 
 impl MemoryGraph {
@@ -423,6 +427,14 @@ impl MemoryGraph {
     pub fn in_memory() -> Arc<Self> {
         let persistence = Arc::new(InMemoryPersistence::new());
         Self::with_persistence(persistence)
+    }
+
+    /// Creates a new in-memory [`MemoryGraph`] with pre-allocated capacity.
+    ///
+    /// Use this for bulk import to avoid rehashing overhead.
+    pub fn in_memory_with_capacity(vertex_capacity: usize, edge_capacity: usize) -> Arc<Self> {
+        let persistence = Arc::new(InMemoryPersistence::new());
+        Self::with_persistence_and_capacity(persistence, vertex_capacity, edge_capacity)
     }
 
     /// Creates a new [`MemoryGraph`] backed by a single database file.
@@ -456,6 +468,34 @@ impl MemoryGraph {
         Self::with_persistence_and_config(persistence, CheckpointConfig::default())
     }
 
+    /// Creates a new [`MemoryGraph`] with the given persistence provider and pre-allocated
+    /// capacity.
+    fn with_persistence_and_capacity(
+        persistence: Arc<dyn PersistenceProvider>,
+        vertex_capacity: usize,
+        edge_capacity: usize,
+    ) -> Arc<Self> {
+        let graph = Arc::new(Self {
+            vertices: DashMap::with_capacity(vertex_capacity),
+            edges: DashMap::with_capacity(edge_capacity),
+            adjacency_list: DashMap::with_capacity(vertex_capacity),
+            txn_manager: MemTxnManager::new(),
+            persistence,
+            checkpoint_lock: RwLock::new(()),
+            checkpoint_config: CheckpointConfig::default(),
+            wal_entries_since_checkpoint: AtomicUsize::new(0),
+            vector_indices: DashMap::new(),
+            vertices_by_label: DashMap::new(),
+        });
+
+        unsafe {
+            let graph_ptr = Arc::as_ptr(&graph) as *mut MemoryGraph;
+            (*graph_ptr).txn_manager.graph = Arc::downgrade(&graph);
+        }
+
+        graph
+    }
+
     /// Creates a new [`MemoryGraph`] with the given persistence provider and checkpoint config.
     fn with_persistence_and_config(
         persistence: Arc<dyn PersistenceProvider>,
@@ -471,6 +511,7 @@ impl MemoryGraph {
             checkpoint_config,
             wal_entries_since_checkpoint: AtomicUsize::new(0),
             vector_indices: DashMap::new(),
+            vertices_by_label: DashMap::new(),
         });
 
         // Set the graph reference in the transaction manager
@@ -487,7 +528,12 @@ impl MemoryGraph {
     /// This loads the checkpoint (if any) and replays WAL entries.
     fn recover(self: &Arc<Self>) -> StorageResult<()> {
         // Load checkpoint if it exists
+        let t0 = std::time::Instant::now();
         if let Some(checkpoint) = self.persistence.read_checkpoint()? {
+            eprintln!(
+                "  checkpoint: deserialized in {:.2}s",
+                t0.elapsed().as_secs_f64()
+            );
             checkpoint.restore(self)?;
         }
 
@@ -673,6 +719,48 @@ impl MemoryGraph {
             ))
     }
 
+    /// Returns the label_id of a vertex without MVCC checks.
+    /// Only safe in read-only analytical contexts where all data is fully committed.
+    pub fn raw_vertex_label_id(&self, vid: VertexId) -> Option<LabelId> {
+        let versioned_vertex = self.vertices.get(&vid)?;
+        let current = versioned_vertex.current().read().unwrap();
+        if current.data.is_tombstone() {
+            None
+        } else {
+            Some(current.data.label_id)
+        }
+    }
+
+    /// Evaluates a closure with a reference to the vertex's properties, without cloning.
+    /// Only safe in read-only analytical contexts where all data is fully committed.
+    /// Returns `None` if the vertex does not exist or is a tombstone.
+    pub fn with_raw_vertex_props<F, R>(&self, vid: VertexId, f: F) -> Option<R>
+    where
+        F: FnOnce(&PropertyRecord) -> R,
+    {
+        let versioned_vertex = self.vertices.get(&vid)?;
+        let current = versioned_vertex.current().read().unwrap();
+        if current.data.is_tombstone() {
+            return None;
+        }
+        Some(f(&current.data.properties))
+    }
+
+    /// Evaluates a closure with a reference to the edge's properties, without cloning.
+    /// Only safe in read-only analytical contexts where all data is fully committed.
+    /// Returns `None` if the edge does not exist or is a tombstone.
+    pub fn with_raw_edge_props<F, R>(&self, eid: EdgeId, f: F) -> Option<R>
+    where
+        F: FnOnce(&PropertyRecord) -> R,
+    {
+        let versioned_edge = self.edges.get(&eid)?;
+        let current = versioned_edge.current().read().unwrap();
+        if current.data.is_tombstone() {
+            return None;
+        }
+        Some(f(&current.data.properties))
+    }
+
     /// Retrieves a vertex by its ID within the context of a transaction.
     pub fn get_vertex(&self, txn: &Arc<MemTransaction>, vid: VertexId) -> StorageResult<Vertex> {
         // Step 1: Atomically retrieve the versioned vertex (check existence).
@@ -808,6 +896,16 @@ impl MemoryGraph {
         &self.persistence
     }
 
+    /// Clear all in-memory graph data (vertices, edges, adjacency list, label index)
+    /// to free memory. The on-disk checkpoint remains intact for future recovery.
+    /// After calling this, the graph instance is empty and should not be queried.
+    pub fn clear_in_memory_data(&self) {
+        self.vertices.clear();
+        self.edges.clear();
+        self.adjacency_list.clear();
+        self.vertices_by_label.clear();
+    }
+
     // ===== Bulk insert methods (bypass transaction system) =====
 
     /// Inserts a vertex directly into the graph without transaction overhead.
@@ -819,7 +917,14 @@ impl MemoryGraph {
     /// Only use for bulk import where crash recovery is not needed (reimport on failure).
     pub fn bulk_insert_vertex(&self, vertex: Vertex) {
         let vid = vertex.vid();
+        let label_id = vertex.label_id;
         self.vertices.insert(vid, VersionedVertex::new(vertex));
+        self.vertices_by_label
+            .entry(label_id)
+            .or_insert_with(|| RwLock::new(Vec::new()))
+            .write()
+            .unwrap()
+            .push(vid);
     }
 
     /// Inserts an edge directly into the graph without transaction overhead.
@@ -854,6 +959,7 @@ impl MemoryGraph {
         vertex: Vertex,
     ) -> StorageResult<VertexId> {
         let vid = vertex.vid();
+        let label_id = vertex.label_id;
         let entry = self
             .vertices
             .entry(vid)
@@ -883,6 +989,14 @@ impl MemoryGraph {
             op: Operation::Delta(DeltaOp::CreateVertex(vertex)),
         };
         txn.redo_buffer.write().unwrap().push(wal_entry);
+
+        // Update per-label index
+        self.vertices_by_label
+            .entry(label_id)
+            .or_insert_with(|| RwLock::new(Vec::new()))
+            .write()
+            .unwrap()
+            .push(vid);
 
         Ok(vid)
     }

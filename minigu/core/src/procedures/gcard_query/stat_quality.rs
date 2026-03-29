@@ -78,7 +78,7 @@ pub fn build_procedure() -> Procedure {
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .collect();
-            let alt_key = AltKey(labels);
+            let alt_key = AltKey::new(labels);
             match statistic.upper_limit_ratio_for_path(&alt_key) {
                 Some(r) => {
                     println!(

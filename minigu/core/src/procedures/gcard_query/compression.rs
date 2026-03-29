@@ -188,8 +188,8 @@ pub fn build_string_dict(keys: &[&AltKey]) -> (Vec<String>, Vec<Vec<u32>>) {
     let mut encoded = Vec::with_capacity(keys.len());
 
     for key in keys {
-        let mut indices = Vec::with_capacity(key.0.len());
-        for s in &key.0 {
+        let mut indices = Vec::with_capacity(key.raw.len());
+        for s in &key.raw {
             let idx = if let Some(&idx) = str_to_idx.get(s.as_str()) {
                 idx
             } else {
@@ -308,7 +308,7 @@ pub fn report_component_sizes(stat: &super::Statistic) {
 
             // alt_key raw size
             let mut key_size = 8; // segment count
-            for s in &alt_key.0 {
+            for s in &alt_key.raw {
                 key_size += 8 + s.as_bytes().len();
             }
             alt_key_raw_size += key_size;
@@ -446,8 +446,8 @@ mod tests {
 
     #[test]
     fn test_string_dict_roundtrip() {
-        let k1 = AltKey(vec!["Person".into(), "knows".into(), "Person".into()]);
-        let k2 = AltKey(vec!["Person".into(), "likes".into(), "Comment".into()]);
+        let k1 = AltKey::new(vec!["Person".into(), "knows".into(), "Person".into()]);
+        let k2 = AltKey::new(vec!["Person".into(), "likes".into(), "Comment".into()]);
         let keys = vec![&k1, &k2];
         let (dict, encoded) = build_string_dict(&keys);
 
@@ -467,6 +467,6 @@ mod tests {
             .iter()
             .map(|&i| dict_decoded[i as usize].clone())
             .collect();
-        assert_eq!(k1.0, k1_restored);
+        assert_eq!(k1.raw, k1_restored);
     }
 }

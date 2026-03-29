@@ -161,31 +161,57 @@ impl GraphSkeleton<AbstractEdge> {
         let generations = self.get_topological_generations(root);
         let max_gen = generations.values().copied().max().unwrap_or(0);
 
+        // Pre-build generation-indexed vertex lists to avoid repeated filtering.
+        let mut gen_to_vertices: Vec<Vec<VertexId>> = vec![Vec::new(); max_gen + 1];
+        for (&v, &g) in &generations {
+            gen_to_vertices[g].push(v);
+        }
+
+        // Pre-build parent and children maps (one pass over all edges).
+        let mut parent_map: HashMap<VertexId, (VertexId, EdgeId)> = HashMap::new();
+        let mut children_map: HashMap<VertexId, Vec<(VertexId, EdgeId)>> = HashMap::new();
+        for (&edge_id, edge) in &self.edges {
+            let src_gen = generations.get(&edge.src).copied();
+            let dst_gen = generations.get(&edge.dst).copied();
+            if let (Some(sg), Some(dg)) = (src_gen, dst_gen) {
+                if sg + 1 == dg {
+                    // src is parent of dst
+                    parent_map.insert(edge.dst, (edge.src, edge_id));
+                    children_map
+                        .entry(edge.src)
+                        .or_default()
+                        .push((edge.dst, edge_id));
+                } else if dg + 1 == sg {
+                    // dst is parent of src
+                    parent_map.insert(edge.src, (edge.dst, edge_id));
+                    children_map
+                        .entry(edge.dst)
+                        .or_default()
+                        .push((edge.src, edge_id));
+                }
+            }
+        }
+
         let mut child_vertex_pcf: HashMap<VertexId, Pcf> = HashMap::new();
 
         for cur_gen in (0..=max_gen).rev() {
-            let cur_vertices: Vec<VertexId> = generations
-                .iter()
-                .filter_map(|(v, g)| (*g == cur_gen).then_some(*v))
-                .collect();
+            for &v in &gen_to_vertices[cur_gen] {
+                let parent_opt = parent_map.get(&v);
+                let children = children_map.get(&v);
 
-            for v in cur_vertices {
-                let parent_opt = self.get_parent_edge(v, root, &generations);
-                let children = self.get_children_edges(v, &generations);
-
-                let parent_to_vertex_pcf = if let Some((parent, parent_edge_id)) = parent_opt {
+                let parent_to_vertex_pcf = if let Some(&(parent, parent_edge_id)) = parent_opt {
                     self.get_edge_pcf_at_vertex(parent_edge_id, parent)
                 } else {
                     Pcf::empty()
                 };
 
-                let vertex_to_parent_pcf = if let Some((_parent, parent_edge_id)) = parent_opt {
+                let vertex_to_parent_pcf = if let Some(&(_parent, parent_edge_id)) = parent_opt {
                     self.get_edge_pcf_at_vertex(parent_edge_id, v)
                 } else {
                     Pcf::empty()
                 };
 
-                let result = if !children.is_empty() {
+                let result = if let Some(children) = children {
                     let child_pcfs: Vec<Pcf> = children
                         .iter()
                         .filter_map(|(child_id, _)| child_vertex_pcf.get(child_id).cloned())

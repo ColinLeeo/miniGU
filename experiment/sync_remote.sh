@@ -25,7 +25,8 @@ REMOTE_DIR="/home/shuolin/miniGU"              # 远程项目目录
 LOCAL_DIR="$(cd "$(dirname "$0")/.." && pwd)"   # 本地项目根目录（脚本上一级）
 
 # SSH 选项（复用连接，加速多次操作；用户名/端口/跳板机由 ~/.ssh/config 管理）
-SSH_OPTS="-o ControlMaster=auto -o ControlPath=/tmp/ssh-minigu-%C -o ControlPersist=600"
+SSH_CONTROL_PATH="/tmp/ssh-minigu-%r@%h:%p"
+SSH_OPTS="-o ControlMaster=auto -o ControlPath=${SSH_CONTROL_PATH} -o ControlPersist=600"
 
 # 远程编译命令
 BUILD_CMD="cd ${REMOTE_DIR} && cargo build --release --bin=minigu"
@@ -49,25 +50,20 @@ RSYNC_EXCLUDES=(
     "target/"
 
     # 实验数据（大文件，远程应已有或单独准备）
-    "experiment/dataset/ldbc/sf*/"
-    "experiment/duckdb"
+    "experiment/dataset/"
 
     # 实验结果
     "experiment/result/"
 
-    # baseline 编译产物（远程构建，不要删除）
-    "experiment/baseline/gcare/build/"
-    "experiment/baseline/pathce/target/"
-    "experiment/baseline/glogs/ir/target/"
-    "experiment/baseline/color/Manifest.toml"
+    # baseline（含 boost 等大量源码，远程单独构建）
+    "experiment/baseline/"
 
     # baseline 准备的数据产物
     "experiment/catalogs/"
     "experiment/graphs/"
-    "experiment/dataset/ldbc/sf*.txt"
-    "experiment/dataset/ldbc/sf*.graph*"
 
-    # 日志
+    # 杂项
+    "experiment/duckdb"
     "*.log"
 )
 

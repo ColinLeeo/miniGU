@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crossbeam_skiplist::SkipSet;
-use minigu_common::types::{EdgeId, VertexId};
+use minigu_common::types::{EdgeId, LabelId, VertexId};
 
 use crate::common::iterators::{AdjacencyIteratorTrait, Direction};
 use crate::common::model::edge::Neighbor;
@@ -174,5 +174,121 @@ impl MemTransaction {
     #[allow(dead_code)]
     pub fn iter_adjacency_incoming(&self, vid: VertexId) -> AdjacencyIterator<'_> {
         AdjacencyIterator::new(self, vid, Direction::Incoming)
+    }
+
+    /// Returns neighbor IDs for the given vertex and edge type without MVCC visibility checks.
+    /// Uses a range scan on the sorted SkipSet (ordered by label_id first), so only neighbors
+    /// with the matching edge label are visited — no full scan + filter needed.
+    /// Only safe in read-only analytical contexts where all data is fully committed.
+    pub fn raw_neighbors_by_edge(
+        &self,
+        vid: VertexId,
+        edge_label_id: LabelId,
+        outgoing: bool,
+    ) -> Vec<VertexId> {
+        use crate::common::model::edge::Neighbor;
+
+        let Some(adj_arc) = self.graph().adjacency_list.get(&vid).map(|adj| {
+            if outgoing {
+                adj.outgoing().clone()
+            } else {
+                adj.incoming().clone()
+            }
+        }) else {
+            return Vec::new();
+        };
+
+        // Neighbor is ordered by (label_id, neighbor_id, eid), so all neighbors with
+        // the target edge_label_id form a contiguous range in the SkipSet.
+        let lo = Neighbor::new(edge_label_id, VertexId::MIN, EdgeId::MIN);
+        let hi = Neighbor::new(edge_label_id, VertexId::MAX, EdgeId::MAX);
+        adj_arc
+            .range(lo..=hi)
+            .map(|e| e.value().neighbor_id())
+            .collect()
+    }
+
+    /// Like `raw_neighbors_by_edge` but appends results into the provided buffer,
+    /// avoiding per-call allocation. Caller should call `buf.clear()` if needed.
+    pub fn raw_neighbors_by_edge_into(
+        &self,
+        vid: VertexId,
+        edge_label_id: LabelId,
+        outgoing: bool,
+        buf: &mut Vec<VertexId>,
+    ) {
+        let Some(adj_arc) = self.graph().adjacency_list.get(&vid).map(|adj| {
+            if outgoing {
+                adj.outgoing().clone()
+            } else {
+                adj.incoming().clone()
+            }
+        }) else {
+            return;
+        };
+
+        let lo = Neighbor::new(edge_label_id, VertexId::MIN, EdgeId::MIN);
+        let hi = Neighbor::new(edge_label_id, VertexId::MAX, EdgeId::MAX);
+        buf.extend(adj_arc.range(lo..=hi).map(|e| e.value().neighbor_id()));
+    }
+
+    /// Like `raw_neighbors_by_edge` but also returns EdgeId for each neighbor.
+    /// Needed by wander join when edge predicates must be evaluated on the chosen edge.
+    pub fn raw_neighbors_with_eid_by_edge(
+        &self,
+        vid: VertexId,
+        edge_label_id: LabelId,
+        outgoing: bool,
+    ) -> Vec<(VertexId, EdgeId)> {
+        use crate::common::model::edge::Neighbor;
+
+        let Some(adj_arc) = self.graph().adjacency_list.get(&vid).map(|adj| {
+            if outgoing {
+                adj.outgoing().clone()
+            } else {
+                adj.incoming().clone()
+            }
+        }) else {
+            return Vec::new();
+        };
+
+        let lo = Neighbor::new(edge_label_id, VertexId::MIN, EdgeId::MIN);
+        let hi = Neighbor::new(edge_label_id, VertexId::MAX, EdgeId::MAX);
+        adj_arc
+            .range(lo..=hi)
+            .map(|e| {
+                let n = e.value();
+                (n.neighbor_id(), n.eid())
+            })
+            .collect()
+    }
+
+    /// Like `raw_neighbors_with_eid_by_edge` but appends results into the provided buffer,
+    /// avoiding per-call allocation. Caller should call `buf.clear()` if needed.
+    pub fn raw_neighbors_with_eid_by_edge_into(
+        &self,
+        vid: VertexId,
+        edge_label_id: LabelId,
+        outgoing: bool,
+        buf: &mut Vec<(VertexId, EdgeId)>,
+    ) {
+        use crate::common::model::edge::Neighbor;
+
+        let Some(adj_arc) = self.graph().adjacency_list.get(&vid).map(|adj| {
+            if outgoing {
+                adj.outgoing().clone()
+            } else {
+                adj.incoming().clone()
+            }
+        }) else {
+            return;
+        };
+
+        let lo = Neighbor::new(edge_label_id, VertexId::MIN, EdgeId::MIN);
+        let hi = Neighbor::new(edge_label_id, VertexId::MAX, EdgeId::MAX);
+        buf.extend(adj_arc.range(lo..=hi).map(|e| {
+            let n = e.value();
+            (n.neighbor_id(), n.eid())
+        }));
     }
 }

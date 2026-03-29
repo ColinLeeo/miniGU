@@ -6,10 +6,11 @@
 // It can be used for backup, recovery, or state transfer purposes.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use minigu_common::types::{EdgeId, VertexId};
 use minigu_transaction::Timestamp;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::memory_graph::{AdjacencyContainer, MemoryGraph, VersionedEdge, VersionedVertex};
@@ -22,7 +23,7 @@ use crate::error::StorageResult;
 /// A GraphCheckpoint contains:
 /// 1. Metadata about the checkpoint (timestamp, LSN, etc.)
 /// 2. Serialized vertices and edges
-/// 3. Adjacency list information
+/// Adjacency list is rebuilt from edges during restore (kept for serialization compat).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphCheckpoint {
     /// Metadata about the checkpoint
@@ -34,8 +35,17 @@ pub struct GraphCheckpoint {
     /// Serialized edges (current version only, no history)
     pub edges: HashMap<EdgeId, SerializedEdge>,
 
-    /// Serialized adjacency list
-    pub adjacency_list: HashMap<VertexId, SerializedAdjacency>,
+    /// Legacy field — kept for backward-compatible deserialization of old checkpoints.
+    /// New checkpoints write an empty map; restore always rebuilds from edges.
+    #[serde(default)]
+    adjacency_list: HashMap<VertexId, LegacyAdjacency>,
+}
+
+/// Legacy adjacency format for backward-compatible deserialization only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LegacyAdjacency {
+    outgoing: Vec<(EdgeId, VertexId)>,
+    incoming: Vec<(EdgeId, VertexId)>,
 }
 
 /// Metadata about a checkpoint
@@ -72,16 +82,6 @@ pub struct SerializedEdge {
 
     /// Commit timestamp of the edge
     pub commit_ts: Timestamp,
-}
-
-/// Serialized representation of adjacency information for a vertex
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SerializedAdjacency {
-    /// Outgoing edges from this vertex
-    pub outgoing: Vec<(EdgeId, VertexId)>,
-
-    /// Incoming edges to this vertex
-    pub incoming: Vec<(EdgeId, VertexId)>,
 }
 
 impl GraphCheckpoint {
@@ -154,30 +154,11 @@ impl GraphCheckpoint {
             );
         }
 
-        // Serialize adjacency list
-        let mut adjacency_list = HashMap::new();
-        for entry in graph.adjacency_list.iter() {
-            let vertex_id = *entry.key();
-            let adj_container = entry.value();
-
-            let mut outgoing = Vec::new();
-            for neighbor in adj_container.outgoing().iter() {
-                outgoing.push((neighbor.value().eid(), neighbor.value().neighbor_id()));
-            }
-
-            let mut incoming = Vec::new();
-            for neighbor in adj_container.incoming().iter() {
-                incoming.push((neighbor.value().eid(), neighbor.value().neighbor_id()));
-            }
-
-            adjacency_list.insert(vertex_id, SerializedAdjacency { outgoing, incoming });
-        }
-
         Self {
             metadata,
             vertices,
             edges,
-            adjacency_list,
+            adjacency_list: HashMap::new(),
         }
     }
 
@@ -199,10 +180,8 @@ impl GraphCheckpoint {
     ///
     /// A fully reconstructed [`Arc<MemoryGraph>`] containing the state at the time of checkpoint
     /// creation.
-    pub fn restore(&self, graph: &Arc<MemoryGraph>) -> StorageResult<()> {
+    pub fn restore(self, graph: &Arc<MemoryGraph>) -> StorageResult<()> {
         // Set the next LSN to checkpoint LSN + 1
-        // The checkpoint represents state "up to and including" checkpoint.lsn,
-        // so the next available LSN is checkpoint.lsn + 1
         graph.persistence.set_next_lsn(self.metadata.lsn + 1);
 
         // Set the latest commit timestamp
@@ -211,52 +190,128 @@ impl GraphCheckpoint {
             std::sync::atomic::Ordering::SeqCst,
         );
 
-        // Restore vertices
-        for (vid, serialized_vertex) in &self.vertices {
-            let versioned_vertex = VersionedVertex::new(serialized_vertex.data.clone());
-            // Set the commit timestamp
-            let mut current = versioned_vertex.chain.current.write().unwrap();
-            current.commit_ts = serialized_vertex.commit_ts;
-            drop(current);
+        let t0 = std::time::Instant::now();
+        let vertex_count = self.vertices.len();
+        let edge_count = self.edges.len();
 
-            graph.vertices.insert(*vid, versioned_vertex);
+        // Restore vertices in parallel (consume to avoid clone)
+        let vertex_vec: Vec<_> = self.vertices.into_iter().collect();
+        vertex_vec.into_par_iter().for_each(|(vid, sv)| {
+            let label_id = sv.data.label_id;
+            let commit_ts = sv.commit_ts;
+            let versioned_vertex = VersionedVertex::new(sv.data);
+            versioned_vertex.chain.current.write().unwrap().commit_ts = commit_ts;
+
+            graph.vertices.insert(vid, versioned_vertex);
+
+            graph
+                .vertices_by_label
+                .entry(label_id)
+                .or_insert_with(|| RwLock::new(Vec::new()))
+                .write()
+                .unwrap()
+                .push(vid);
+        });
+
+        eprintln!(
+            "  checkpoint: restored {} vertices in {:.2}s",
+            vertex_count,
+            t0.elapsed().as_secs_f64()
+        );
+        let t1 = std::time::Instant::now();
+
+        // Restore edges in parallel (consume to avoid clone)
+        let edge_vec: Vec<_> = self.edges.into_iter().collect();
+        edge_vec.into_par_iter().for_each(|(eid, se)| {
+            let commit_ts = se.commit_ts;
+            let versioned_edge = VersionedEdge::new(se.data);
+            versioned_edge.chain.current.write().unwrap().commit_ts = commit_ts;
+
+            graph.edges.insert(eid, versioned_edge);
+        });
+
+        eprintln!(
+            "  checkpoint: restored {} edges in {:.2}s",
+            edge_count,
+            t1.elapsed().as_secs_f64()
+        );
+        let t2 = std::time::Instant::now();
+
+        // Rebuild adjacency list from edges.
+        // Strategy: group edges by vertex, then build each vertex's adjacency in parallel.
+        // This avoids lock contention on the same SkipSet from multiple threads.
+        let edge_tuples: Vec<_> = graph
+            .edges
+            .iter()
+            .map(|entry| {
+                let eid = *entry.key();
+                let c = entry.value().chain.current.read().unwrap();
+                (eid, c.data.label_id(), c.data.src_id, c.data.dst_id)
+            })
+            .collect();
+
+        // Group by vertex: outgoing edges per src, incoming edges per dst
+        let mut outgoing_map: HashMap<
+            VertexId,
+            Vec<(EdgeId, minigu_common::types::LabelId, VertexId)>,
+        > = HashMap::new();
+        let mut incoming_map: HashMap<
+            VertexId,
+            Vec<(EdgeId, minigu_common::types::LabelId, VertexId)>,
+        > = HashMap::new();
+
+        for &(eid, label_id, src_id, dst_id) in &edge_tuples {
+            outgoing_map
+                .entry(src_id)
+                .or_default()
+                .push((eid, label_id, dst_id));
+            incoming_map
+                .entry(dst_id)
+                .or_default()
+                .push((eid, label_id, src_id));
         }
+        drop(edge_tuples);
 
-        // Restore edges
-        for (eid, serialized_edge) in &self.edges {
-            let versioned_edge = VersionedEdge::new(serialized_edge.data.clone());
-            // Set the commit timestamp
-            let mut current = versioned_edge.chain.current.write().unwrap();
-            current.commit_ts = serialized_edge.commit_ts;
-            drop(current);
+        // Collect all unique vertex IDs that need adjacency entries
+        let mut all_vids: Vec<VertexId> = outgoing_map
+            .keys()
+            .chain(incoming_map.keys())
+            .copied()
+            .collect();
+        all_vids.sort_unstable();
+        all_vids.dedup();
 
-            graph.edges.insert(*eid, versioned_edge);
-        }
+        // Build adjacency per vertex in parallel (no contention on the same SkipSet)
+        all_vids.into_par_iter().for_each(|vid| {
+            let container = AdjacencyContainer::new();
 
-        // Restore adjacency list
-        for (vid, serialized_adjacency) in &self.adjacency_list {
-            let adjacency_container = AdjacencyContainer::new();
-
-            // Restore outgoing edges
-            for (edge_id, dst_id) in &serialized_adjacency.outgoing {
-                let edge = graph.edges.get(edge_id).unwrap();
-                let label_id = edge.chain.current.read().unwrap().data.label_id();
-                adjacency_container
-                    .outgoing()
-                    .insert(Neighbor::new(label_id, *dst_id, *edge_id));
+            if let Some(edges) = outgoing_map.get(&vid) {
+                for &(eid, label_id, dst_id) in edges {
+                    container
+                        .outgoing()
+                        .insert(Neighbor::new(label_id, dst_id, eid));
+                }
             }
 
-            // Restore incoming edges
-            for (edge_id, src_id) in &serialized_adjacency.incoming {
-                let edge = graph.edges.get(edge_id).unwrap();
-                let label_id = edge.chain.current.read().unwrap().data.label_id();
-                adjacency_container
-                    .incoming()
-                    .insert(Neighbor::new(label_id, *src_id, *edge_id));
+            if let Some(edges) = incoming_map.get(&vid) {
+                for &(eid, label_id, src_id) in edges {
+                    container
+                        .incoming()
+                        .insert(Neighbor::new(label_id, src_id, eid));
+                }
             }
 
-            graph.adjacency_list.insert(*vid, adjacency_container);
-        }
+            graph.adjacency_list.insert(vid, container);
+        });
+
+        eprintln!(
+            "  checkpoint: rebuilt adjacency in {:.2}s",
+            t2.elapsed().as_secs_f64()
+        );
+        eprintln!(
+            "  checkpoint: total restore time {:.2}s",
+            t0.elapsed().as_secs_f64()
+        );
 
         Ok(())
     }
@@ -292,11 +347,6 @@ mod tests {
             alice_serialized.data.properties()[0],
             ScalarValue::String(Some("Alice".to_string()))
         );
-
-        // Verify adjacency list
-        let alice_adj = checkpoint.adjacency_list.get(&alice_vid).unwrap();
-        assert!(alice_adj.outgoing.len() == 2);
-        assert!(alice_adj.incoming.len() == 1);
     }
 
     #[test]
@@ -312,6 +362,8 @@ mod tests {
 
         // Restore graph from checkpoint
         checkpoint.restore(&restored_graph).unwrap();
+        // Re-create checkpoint for comparison (original was consumed)
+        let _checkpoint = GraphCheckpoint::new(&original_graph);
 
         let origin_txn = original_graph
             .txn_manager()

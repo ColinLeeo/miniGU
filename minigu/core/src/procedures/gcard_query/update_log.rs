@@ -184,9 +184,9 @@ impl GCardUpdateLog {
                     continue;
                 }
                 let mut new_parts = vec![nbr_label.clone(), edge_name];
-                new_parts.extend_from_slice(&entry.template.0);
+                new_parts.extend_from_slice(&entry.template.raw);
                 to_expand.push(UpdateEntry {
-                    template: AltKey(new_parts),
+                    template: AltKey::new(new_parts),
                     label: nbr_label,
                     nodes,
                     res_len: entry.res_len - 1,
@@ -271,7 +271,7 @@ impl GCardUpdateLog {
         }
 
         for ((neighbor_label, edge_label), neighbor_ids) in groups {
-            let template = AltKey(vec![
+            let template = AltKey::new(vec![
                 neighbor_label.clone(),
                 edge_label,
                 u_label.to_string(),
@@ -301,7 +301,7 @@ impl GCardUpdateLog {
         let res_len = self.max_k.saturating_sub(1);
 
         self.entries.push(UpdateEntry {
-            template: AltKey(vec![
+            template: AltKey::new(vec![
                 u_label.to_string(),
                 edge_label.to_string(),
                 v_label.to_string(),
@@ -312,7 +312,7 @@ impl GCardUpdateLog {
         });
 
         self.entries.push(UpdateEntry {
-            template: AltKey(vec![
+            template: AltKey::new(vec![
                 v_label.to_string(),
                 edge_label.to_string(),
                 u_label.to_string(),

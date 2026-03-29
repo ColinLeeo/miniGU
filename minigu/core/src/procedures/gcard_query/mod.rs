@@ -4,6 +4,8 @@ mod catalog;
 pub mod compact_update_log;
 pub mod compression;
 pub mod create_catalog;
+mod degree_compute;
+mod degree_compute_dense;
 mod degreepiecewise;
 pub mod error;
 pub mod stat_quality;
@@ -15,13 +17,16 @@ pub use catalog::make_alt_key;
 pub use statistic::Statistic;
 mod graph;
 pub mod load_catalog;
+pub mod load_ldbc;
 mod query_graph;
 pub mod types;
 mod union_find;
+pub mod utils;
 
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 use std::{fmt, fs, io};
 
 use minigu_common::data_chunk;
@@ -36,6 +41,8 @@ use crate::procedures::gcard_query::query_graph::QueryGraph;
 use crate::procedures::gcard_query::types::Query;
 
 static GCARD_VERBOSE: AtomicBool = AtomicBool::new(false);
+pub(crate) static SAMPLING_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 use std::convert::TryFrom;
 
 use serde::{Deserialize, Serialize};
@@ -46,7 +53,6 @@ impl TryFrom<u8> for PredicateApplyType {
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(PredicateApplyType::INNER),
-            1 => Ok(PredicateApplyType::OUTER),
             2 => Ok(PredicateApplyType::IGNORE),
             _ => Err("invalid PredicateApplyType value"),
         }
@@ -57,7 +63,6 @@ impl fmt::Display for PredicateApplyType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PredicateApplyType::INNER => write!(f, "INNER"),
-            PredicateApplyType::OUTER => write!(f, "OUTER"),
             PredicateApplyType::IGNORE => write!(f, "IGNORE"),
         }
     }
@@ -65,7 +70,6 @@ impl fmt::Display for PredicateApplyType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum PredicateApplyType {
     INNER,
-    OUTER,
     IGNORE,
 }
 
@@ -164,6 +168,15 @@ pub fn build_procedure() -> Procedure {
             .map(|n| if n <= 0 { 50 } else { n as usize })
             .unwrap_or(10);
 
+        #[cfg(feature = "profiling")]
+        let guard = pprof::ProfilerGuardBuilder::default()
+            .frequency(1000)
+            .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+            .build()
+            .expect("failed to start pprof profiler");
+
+        SAMPLING_NANOS.store(0, Ordering::Relaxed);
+        let build_start = Instant::now();
         let cardinality = match query_graph.build_abstract_graph(
             max_path_length,
             max_subgraphs,
@@ -173,6 +186,9 @@ pub fn build_procedure() -> Procedure {
             &predicate_apply_type,
         ) {
             Ok(abstract_graphs_with_scores) => {
+                let build_elapsed = build_start.elapsed();
+                let sampling_secs = SAMPLING_NANOS.load(Ordering::Relaxed) as f64 / 1e9;
+                let estimate_start = Instant::now();
                 let total_count = abstract_graphs_with_scores.len();
                 let mut min_nonzero_es = f64::INFINITY;
                 let mut score_of_min_es: Option<u32> = None;
@@ -195,17 +211,6 @@ pub fn build_procedure() -> Procedure {
                             println!("dst : {}", edge.dst_pcf);
                         }
                     }
-                    let selectity_outter: f64 = if predicate_apply_type == PredicateApplyType::OUTER
-                    {
-                        let pred = abs.get_selectivity();
-                        if GCARD_VERBOSE.load(Ordering::Relaxed) {
-                            println!("pred totally selectivity: {}", pred);
-                        }
-                        pred
-                    } else {
-                        1.0
-                    };
-
                     let mut es = abs.get_es().map_err(|e| {
                         ExecutionError::Custom(Box::new(io::Error::new(
                             io::ErrorKind::InvalidData,
@@ -214,14 +219,8 @@ pub fn build_procedure() -> Procedure {
                     })?;
 
                     if GCARD_VERBOSE.load(Ordering::Relaxed) {
-                        println!(
-                            "es: {}, after pred selective: {}",
-                            es,
-                            es * selectity_outter
-                        );
-                        println!("");
+                        println!("es: {}", es);
                     }
-                    es *= selectity_outter;
                     if es > 1.0 {
                         if es < min_nonzero_es {
                             min_nonzero_es = es;
@@ -236,11 +235,17 @@ pub fn build_procedure() -> Procedure {
                 } else {
                     0.0
                 };
+                let estimate_elapsed = estimate_start.elapsed();
                 let is_highest = score_of_min_es.map(|s| s == max_score).unwrap_or(false);
                 let display_index = if is_highest { Some(1) } else { index_of_min_es };
                 print!(
-                    "total: {}, min_es index: {:?}, is highest: {}, ",
-                    total_count, display_index, is_highest,
+                    "total: {}, min_es index: {:?}, is highest: {}, sample_time: {:.6}, estimate_time: {:.6}, build_time: {:.6}, ",
+                    total_count,
+                    display_index,
+                    is_highest,
+                    sampling_secs,
+                    estimate_elapsed.as_secs_f64(),
+                    build_elapsed.as_secs_f64(),
                 );
                 cardinality_value
             }
@@ -252,6 +257,23 @@ pub fn build_procedure() -> Procedure {
                 0.0
             }
         };
+
+        #[cfg(feature = "profiling")]
+        {
+            if let Ok(report) = guard.report().build() {
+                let svg_path = format!(
+                    "gcard_flamegraph_{}.svg",
+                    Path::new(query_json_path.as_str())
+                        .file_stem()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown")
+                );
+                if let Ok(file) = std::fs::File::create(&svg_path) {
+                    let _ = report.flamegraph(file);
+                    println!("[profiling] flamegraph saved to: {}", svg_path);
+                }
+            }
+        }
         let stem = Path::new(query_json_path.as_str())
             .file_stem()
             .and_then(|n| n.to_str());

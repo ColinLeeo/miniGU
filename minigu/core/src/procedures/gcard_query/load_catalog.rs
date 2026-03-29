@@ -1,8 +1,10 @@
 use std::sync::Arc;
+
 use minigu_catalog::provider::SchemaProvider;
 use minigu_common::data_type::LogicalType;
 use minigu_context::graph::GraphContainer;
 use minigu_context::procedure::Procedure;
+
 use crate::procedures::gcard_query::statistic::load_statistic;
 
 /// Procedure: `call load_catalog("<graph_name>")`

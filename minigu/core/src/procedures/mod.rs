@@ -49,6 +49,10 @@ pub fn build_predefined_procedures() -> Vec<(String, Procedure)> {
             "build_ldbc_manifest".to_string(),
             build_ldbc_mainfest::build_procedure(),
         ),
+        (
+            "load_ldbc".to_string(),
+            gcard_query::load_ldbc::build_procedure(),
+        ),
         ("gcard_query".to_string(), gcard_query::build_procedure()),
         ("mutate_graph".to_string(), mutate_graph::build_procedure()),
         (
