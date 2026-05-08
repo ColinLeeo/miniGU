@@ -1,0 +1,19 @@
+section,key,value
+distribution,comment_browserused,"['Firefox', 'Chrome', 'Internet Explorer', 'Safari', 'Opera']"
+distribution,comment_creationdate,"[1265602207329, 1326464435099, 1339529952127, 1346543220708, 1349568265095, 1351864583841, 1354479274181, 1356245809184]"
+distribution,comment_deletiondate,"[1271371535610, 1356998400000, 1356998400000, 1356998400000]"
+distribution,comment_length,"[2, 3, 4, 5, 20, 50, 79, 88, 100, 120]"
+distribution,person_birthday,"[315532800000, 346550400000, 392342400000, 440553600000, 473126400000, 504576000000, 550800000000, 597196800000]"
+distribution,person_browserused,"['Firefox', 'Chrome', 'Internet Explorer', 'Safari', 'Opera']"
+distribution,person_creationdate,"[1262310843489, 1271792357357, 1285917807738, 1300149667532, 1309606682229, 1318881134242, 1333330850691, 1347672536188]"
+distribution,person_gender,"['female', 'male']"
+distribution,post_browserused,"['Firefox', 'Chrome', 'Internet Explorer', 'Safari', 'Opera']"
+distribution,post_creationdate,"[1262534150927, 1290789839378, 1308528557908, 1320452265251, 1327902746004, 1334852278597, 1343687623368, 1352040354165]"
+distribution,post_deletiondate,"[1262998912298, 1356998400000, 1577664000000, 1577664000000]"
+distribution,post_length,"[0, 1, 10, 50, 80, 100, 108, 150, 200]"
+generated,L1_PA,30
+generated,L2_PB,30
+generated,L3_PB,30
+generated,L4_PA,30
+generated,L5_PB,30
+generated,L6_PA,30
